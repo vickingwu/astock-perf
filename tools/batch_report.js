@@ -1,6 +1,6 @@
 /* 批量分析：复用 app.js 的计算引擎，对下方 ASSETS 列表逐个拉数并输出 results.json + summary.md（写到当前目录）
  * 用法：node tools/batch_report.js   （类型 S=股票 E=ETF 用 市场.代码；F=场外基金 用基金代码，走天天基金复权净值）
- * 区间：最近 20 年（上市不足取全部）；可改 addMonths(last.t, -240) 调整 */
+ * 区间：最近 20 年（上市不足取全部）；可改 addMonths(last.t, -240) 调整。接口有限流，脚本自带重试与间隔 */
 'use strict';
 const https = require('https');
 const fs = require('fs');
@@ -56,7 +56,12 @@ const ASSETS = [
   ['西藏旅游', 'S', '1.600749'],
 ];
 
-function get(url, headers) {
+async function get(url, headers) {
+  for (let i = 0; ; i++) {
+    try { return await get1(url, headers); } catch (e) { if (i >= 4) throw e; await new Promise((r) => setTimeout(r, 2000 * (i + 1))); }
+  }
+}
+function get1(url, headers) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: Object.assign({ 'User-Agent': 'Mozilla/5.0' }, headers || {}), timeout: 30000 }, (res) => {
       let body = '';
@@ -133,7 +138,7 @@ async function run() {
       });
       console.log('ok', d.name, all.length, 'bars, window', E.fmtDate(A.t[0]), '->', E.fmtDate(last.t));
     } catch (err) { console.log('FAILED', err.message); out.push({ disp, type, id, error: err.message }); }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 700));
   }
   fs.writeFileSync(path.join(process.cwd(), 'results.json'), JSON.stringify(out, null, 1), 'utf8');
   writeSummary(out);

@@ -172,21 +172,23 @@
   function zigzagPivots(c, T) {
     const n = c.length, pivots = [];
     if (n < 2) return pivots;
-    let trend = 0, extI = 0, maxI = 0, minI = 0, k = 1;
+    let trend = 0, extI = 0, baseI = 0, maxI = 0, minI = 0, k = 1; // baseI = 当前趋势的起点极值
     for (; k < n; k++) {
       if (c[k] > c[maxI]) maxI = k;
       if (c[k] < c[minI]) minI = k;
-      if (c[k] <= c[maxI] * (1 - T)) { trend = -1; if (maxI > 0) pivots.push(maxI); extI = k; break; }
-      if (c[k] >= c[minI] * (1 + T)) { trend = 1; if (minI > 0) pivots.push(minI); extI = k; break; }
+      if (c[k] <= c[maxI] * (1 - T)) { trend = -1; if (maxI > 0) pivots.push(maxI); baseI = maxI; extI = k; break; }
+      if (c[k] >= c[minI] * (1 + T)) { trend = 1; if (minI > 0) pivots.push(minI); baseI = minI; extI = k; break; }
     }
     if (trend === 0) return pivots;
     for (k = k + 1; k < n; k++) {
+      // 反转确认：① 自阶段极值反向运行 ≥T；② 或跌破本轮牛市的起点（上一个谷）——"更低的低点"本身就否定了牛市，
+      //   即便回落幅度不足 T。熊市对称（突破上一个峰），阈值对称时②在熊市中实际不会先于①触发。
       if (trend === 1) {
         if (c[k] >= c[extI]) extI = k;
-        else if (c[k] <= c[extI] * (1 - T)) { pivots.push(extI); trend = -1; extI = k; }
+        else if (c[k] <= c[extI] * (1 - T) || c[k] < c[baseI]) { pivots.push(extI); baseI = extI; trend = -1; extI = k; }
       } else {
         if (c[k] <= c[extI]) extI = k;
-        else if (c[k] >= c[extI] * (1 + T)) { pivots.push(extI); trend = 1; extI = k; }
+        else if (c[k] >= c[extI] * (1 + T) || c[k] > c[baseI]) { pivots.push(extI); baseI = extI; trend = 1; extI = k; }
       }
     }
     return pivots;
@@ -201,6 +203,14 @@
     return out;
   }
 
+  // 在 [lo, hi] 内找极值下标（isPeak 取最大，否则最小）；区间为空时返回 fallback
+  function argExt(c, lo, hi, isPeak, fallback) {
+    if (hi < lo) return fallback;
+    let best = lo;
+    for (let i = lo; i <= hi; i++) if (isPeak ? c[i] > c[best] : c[i] < c[best]) best = i;
+    return best;
+  }
+
   // 先在采样序列上识别转折，再在日线上精确定位峰谷（相邻转折之间的日收盘极值）
   function segmentPhases(bars, c, T, basis) {
     const n = c.length;
@@ -208,20 +218,25 @@
     const idx = sampleIndices(bars, basis);
     const sc = idx.map((i) => c[i]);
     const sp = zigzagPivots(sc, T);
-    const refined = [];
+    const refined = [], types = []; // types[k] = true 表示峰
     if (sp.length) {
       const nextRef = sp.length > 1 ? sc[sp[1]] : sc[sc.length - 1];
       let isPeak = sc[sp[0]] > nextRef;
       let prev = -1;
       for (let k = 0; k < sp.length; k++) {
-        const lo = prev + 1;
         const hi = k + 1 < sp.length ? idx[sp[k + 1]] - 1 : n - 1;
-        let best = idx[sp[k]];
-        if (hi >= lo) {
-          best = lo;
-          for (let i = lo; i <= hi; i++) if (isPeak ? c[i] > c[best] : c[i] < c[best]) best = i;
-        }
-        refined.push(best); prev = best; isPeak = !isPeak;
+        const best = argExt(c, prev + 1, hi, isPeak, idx[sp[k]]);
+        refined.push(best); types.push(isPeak); prev = best; isPeak = !isPeak;
+      }
+      // 进行中的阶段必须自其日线起点起已走出一次 ≥T 的行情，否则并入上一阶段
+      // （采样序列上确认过的反弹，若之后价格创出新低，"牛市"便不再成立；熊市对称）
+      while (refined.length) {
+        const k = refined.length - 1, R = refined[k], peakStart = types[k];
+        let ext = c[R];
+        for (let i = R + 1; i < n; i++) ext = peakStart ? Math.min(ext, c[i]) : Math.max(ext, c[i]);
+        if (peakStart ? ext <= c[R] * (1 - T) : ext >= c[R] * (1 + T)) break;
+        refined.pop(); types.pop();
+        if (refined.length) { const j = refined.length - 1; refined[j] = argExt(c, (j > 0 ? refined[j - 1] : -1) + 1, n - 1, types[j], refined[j]); }
       }
     }
     const bounds = [0].concat(refined, [n - 1]);
@@ -267,9 +282,10 @@
     const basis = basisOpt === 'auto' || !basisOpt ? autoBasis(days) : basisOpt;
     const phases = segmentPhases(bars, c, T, basis).map((p) => {
       const ret = c[p.e] / c[p.s] - 1, d = t[p.e] - t[p.s];
-      let lo = Infinity, hi = -Infinity;
-      for (let i = p.s; i <= p.e; i++) { const y = c[i] / c[p.s] - 1; if (y < lo) lo = y; if (y > hi) hi = y; }
-      return Object.assign(p, { ret, days: d, ann: d >= 365 ? Math.pow(1 + ret, 365.25 / d) - 1 : null, lo, hi });
+      let lo = Infinity, hi = -Infinity, loI = p.s, hiI = p.s;
+      for (let i = p.s; i <= p.e; i++) { const y = c[i] / c[p.s] - 1; if (y < lo) { lo = y; loI = i; } if (y > hi) { hi = y; hiI = i; } }
+      const extI = p.bull ? hiI : loI; // 阶段极值（牛市高点 / 熊市低点）
+      return Object.assign(p, { ret, days: d, ann: d >= 365 ? Math.pow(1 + ret, 365.25 / d) - 1 : null, lo, hi, extI, fromExt: c[p.e] / c[extI] - 1 });
     });
 
     // volatility (annualised std of daily log returns)
@@ -579,6 +595,7 @@
         if (!show) continue;
         const lines = [{ s: fmtYM(t[p.e]) + (p.ongoing ? ' 至今' : ''), w: 500 }, { s: fmtDur(p.days) + ' · ' + pct(p.ret), w: 700 }];
         if (p.ann != null) lines.push({ s: pct(p.ann) + '/yr', w: 500 });
+        if (p.ongoing && Math.abs(p.fromExt) >= 0.005) lines.push({ s: (p.bull ? '距高点 ' : '距低点 ') + pct(p.fromExt), w: 500 });
         const size = 10.5, lh = 12.5;
         const w = Math.max.apply(null, lines.map((l) => textW(l.s, size, l.w))) + 10, bh = lines.length * lh + 6;
         const ax = x(t[p.e]);
@@ -673,6 +690,7 @@
     const ep = A.maxDD;
     const lifeDays = last.t - all[0].t;
     const lifeCagr = lifeDays >= 20 ? Math.pow(last.c / all[0].c, 365.25 / lifeDays) - 1 : NaN;
+    const curPh = A.phases.length ? A.phases[A.phases.length - 1] : null;
     const cards = [
       { k: esc(meta.code) + ' · ' + esc(tag.txt) + ' · 最新收盘 ' + fmtDate(last.t), v: '<span class="' + cls(chg) + '">' + fmtPrice(last.c) + ' <small>' + pct(chg, 2) + '</small></span>', s: '<b>' + esc(meta.name) + '</b> · ' + meta.fqtName + ' · 上市首日 ' + fmtDate(all[0].t), head: true },
       { k: '区间总收益', v: '<span class="' + cls(A.total) + '">' + pct(A.total) + '</span>', s: fmtDate(A.t[0]) + ' → ' + fmtDate(A.t[A.n - 1]) },
@@ -681,7 +699,7 @@
       { k: '最大回撤历时', v: ep ? fmtDurCN(A.t[ep.trough] - A.t[ep.peak]) : '—', s: ep ? (ep.end != null ? '修复用时 ' + fmtDurCN(A.t[ep.end] - A.t[ep.trough]) + '（' + fmtDate(A.t[ep.end]) + '）' : '尚未修复（已 ' + fmtDurCN(A.t[A.n - 1] - A.t[ep.trough]) + '）') : '' },
       { k: '当前回撤（距区间前高）', v: '<span class="' + (A.curDD < 0 ? 'down' : 'flat') + '">' + pct(A.curDD, 1, false) + '</span>', s: '前高 ' + fmtDate(A.t[A.curPeakIdx]) + ' · ' + fmtPrice(A.c[A.curPeakIdx]) },
       { k: '年化波动率', v: pct(A.vol, 1, false), s: '日收益标准差 × √242' },
-      { k: '牛熊阶段', v: '<span class="up">' + A.phases.filter((p) => p.bull).length + ' 牛</span> / <span class="down">' + A.phases.filter((p) => !p.bull).length + ' 熊</span>', s: '阈值 ' + Math.round(meta.th * 100) + '% · ' + BASIS_NAME[A.basis] + ' · 当前' + (A.phases.length && A.phases[A.phases.length - 1].bull ? '牛市' : '熊市') + '阶段' },
+      { k: '牛熊阶段', v: '<span class="up">' + A.phases.filter((p) => p.bull).length + ' 牛</span> / <span class="down">' + A.phases.filter((p) => !p.bull).length + ' 熊</span>', s: '阈值 ' + Math.round(meta.th * 100) + '% · ' + BASIS_NAME[A.basis] + (curPh ? ' · 当前' + (curPh.bull ? '牛市' : '熊市') + '阶段 ' + pct(curPh.ret) + '，' + (curPh.bull ? '距阶段高点 ' : '距阶段低点 ') + pct(curPh.fromExt) : '') },
       { k: '上市至今年化', v: '<span class="' + cls(lifeCagr) + '">' + pct(lifeCagr) + '</span>', s: ((last.t - all[0].t) / 365.25).toFixed(1) + ' 年 · 累计 ' + pct(last.c / all[0].c - 1) },
     ];
     $('kpis').innerHTML = cards.map((c) => '<div class="kpi' + (c.head ? ' head' : '') + '"><div class="k">' + c.k + '</div><div class="v">' + c.v + '</div><div class="s">' + c.s + '</div></div>').join('');
@@ -713,7 +731,7 @@
 
   function renderPhases(A, th) {
     const head = '<tr><th>#</th><th>阶段</th><th>开始</th><th>结束</th><th>历时</th><th>起点价</th><th>终点价</th><th>涨跌幅</th><th>年化</th></tr>';
-    const rows = A.phases.map((p, i) => '<tr class="' + (p.bull ? 'bull' : 'bear') + '"><td>' + (i + 1) + '</td><td>' + (p.bull ? '牛市' : '熊市') + (p.ongoing ? '（进行中）' : (i === 0 ? '（截断）' : '')) + '</td><td>' + fmtDate(A.t[p.s]) + '</td><td>' + fmtDate(A.t[p.e]) + '</td><td>' + fmtDurCN(p.days) + '</td><td>' + fmtPrice(A.c[p.s]) + '</td><td>' + fmtPrice(A.c[p.e]) + '</td><td class="' + cls(p.ret) + '">' + pct(p.ret) + '</td><td class="' + cls(p.ann) + '">' + (p.ann == null ? '—' : pct(p.ann)) + '</td></tr>').join('');
+    const rows = A.phases.map((p, i) => '<tr class="' + (p.bull ? 'bull' : 'bear') + '"><td>' + (i + 1) + '</td><td>' + (p.bull ? '牛市' : '熊市') + (p.ongoing ? '（进行中，' + (p.bull ? '距阶段高点 ' : '距阶段低点 ') + pct(p.fromExt) + '）' : (i === 0 ? '（截断）' : '')) + '</td><td>' + fmtDate(A.t[p.s]) + '</td><td>' + fmtDate(A.t[p.e]) + '</td><td>' + fmtDurCN(p.days) + '</td><td>' + fmtPrice(A.c[p.s]) + '</td><td>' + fmtPrice(A.c[p.e]) + '</td><td class="' + cls(p.ret) + '">' + pct(p.ret) + '</td><td class="' + cls(p.ann) + '">' + (p.ann == null ? '—' : pct(p.ann)) + '</td></tr>').join('');
     $('phaseTable').innerHTML = head + rows;
     const bulls = A.phases.filter((p) => p.bull && !p.ongoing && !p.first), bears = A.phases.filter((p) => !p.bull && !p.ongoing && !p.first);
     const avg = (arr, f) => arr.length ? arr.reduce((a, p) => a + f(p), 0) / arr.length : null;
