@@ -42,6 +42,14 @@ stocks.js    全部 A 股 + 场内 ETF 代码表（含拼音首字母），由�
 tools/build_stock_list.js   重新生成 stocks.js 的脚本
 ```
 
+### 批量分析一组标的
+
+`tools/batch_report.js` 复用 `app.js` 的计算引擎，对脚本顶部 `ASSETS` 列表逐个拉数（股票/ETF 走东方财富日线，场外基金走天天基金复权净值），在当前目录输出 `results.json` 与 `summary.md`（年化、最大回撤、修复用时、牛熊阶段、多尺度涨跌一览）：
+
+```bash
+node tools/batch_report.js
+```
+
 ### 更新股票列表（新股上市后）
 
 ```bash

@@ -54,8 +54,12 @@
   function cls(x) { return x > 0 ? 'up' : x < 0 ? 'down' : 'flat'; }
   function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-  const _ctx = document.createElement('canvas').getContext('2d');
-  function textW(s, size, weight) { _ctx.font = (weight || 400) + ' ' + size + 'px ' + FONT; return _ctx.measureText(s).width; }
+  const IN_BROWSER = typeof document !== 'undefined';
+  const _ctx = IN_BROWSER ? document.createElement('canvas').getContext('2d') : null;
+  function textW(s, size, weight) {
+    if (!_ctx) return s.length * size * 0.6;
+    _ctx.font = (weight || 400) + ' ' + size + 'px ' + FONT; return _ctx.measureText(s).width;
+  }
 
   // 以 t 为上界的最近一根 K 线（二分）
   function idxOnOrBefore(bars, t) {
@@ -89,7 +93,7 @@
   // 去空格、全角转半角（"五 粮 液" → "五粮液"，"万  科Ａ" → "万科A"）
   function cleanName(s) { return String(s || '').replace(/\s+/g, '').replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)); }
   function normName(s) { return cleanName(s).toLowerCase(); }
-  const LIST = (window.STOCK_LIST || []).map((r) => ({ code: String(r[0]), name: cleanName(r[1]), market: +r[2], type: r[3], py: (r[4] || '').toLowerCase(), nn: normName(r[1]) }));
+  const LIST = ((typeof window !== 'undefined' && window.STOCK_LIST) || []).map((r) => ({ code: String(r[0]), name: cleanName(r[1]), market: +r[2], type: r[3], py: (r[4] || '').toLowerCase(), nn: normName(r[1]) }));
   const BY_KEY = new Map(LIST.map((it) => [it.market + '.' + it.code, it]));
 
   function marketTag(it) {
@@ -910,5 +914,10 @@
     });
   }
 
+  // Node 环境（批量脚本）：只导出计算函数，不触碰 DOM
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { analyze, computeHorizons, periodStats, yearlyReturns, segmentPhases, zigzagPivots, parseYMD, fmtDate, fmtYM, pct, fmtDur, fmtDurCN, fmtMult, cleanName, addMonths, idxOnOrAfter, idxOnOrBefore, ymd, tToDate };
+    return;
+  }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
