@@ -1,0 +1,12 @@
+{
+  "name": "astock-perf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A股 + 场内ETF 历史表现看板（对数走势 / 回撤 / 牛熊周期 / 多尺度涨跌），纯静态页面，本地双击即可打开",
+  "scripts": {
+    "build:list": "node tools/build_stock_list.js"
+  },
+  "devDependencies": {
+    "pinyin-pro": "3.26.0"
+  }
+}

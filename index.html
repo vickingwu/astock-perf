@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A股 / ETF 历史表现看板 · 对数走势 · 回撤 · 牛熊周期</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">📈</span>
+    <div>
+      <div class="brand-title">A股 / 场内ETF 历史表现看板</div>
+      <div class="brand-sub">对数走势 · 最大回撤 · 牛熊周期 · 多尺度涨跌 &nbsp;|&nbsp; 数据：东方财富（日线，实时拉取）</div>
+    </div>
+  </div>
+  <div class="search-wrap">
+    <input id="search" type="text" autocomplete="off" spellcheck="false"
+           placeholder="输入股票/ETF 代码、名称或拼音首字母，如 600749 / 西藏旅游 / xzly / 510300"
+           aria-label="搜索股票或ETF">
+    <div id="suggest" class="suggest" role="listbox" hidden></div>
+  </div>
+</header>
+
+<section class="controls">
+  <div class="ctl-group">
+    <span class="ctl-label">区间</span>
+    <div class="seg" id="rangeSeg">
+      <button data-range="all">全部</button>
+      <button data-range="20y">20年</button>
+      <button data-range="10y" class="on">10年</button>
+      <button data-range="5y">5年</button>
+      <button data-range="3y">3年</button>
+      <button data-range="1y">1年</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label">复权</span>
+    <select id="fqt" aria-label="复权方式">
+      <option value="1" selected>前复权</option>
+      <option value="2">后复权</option>
+      <option value="0">不复权</option>
+    </select>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label">牛熊阈值</span>
+    <select id="threshold" aria-label="牛熊划分阈值" title="价格自阶段极值反向运行超过该幅度，则判定牛熊切换">
+      <option value="0.10">10%</option>
+      <option value="0.15">15%</option>
+      <option value="0.20" selected>20%</option>
+      <option value="0.25">25%</option>
+      <option value="0.30">30%</option>
+      <option value="0.40">40%</option>
+    </select>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label">划分依据</span>
+    <select id="basis" aria-label="牛熊划分所用价格序列" title="以哪种周期的收盘价识别峰谷；周期越长越能过滤短期噪音">
+      <option value="auto" selected>自动（按区间长度）</option>
+      <option value="M">月收盘</option>
+      <option value="W">周收盘</option>
+      <option value="D">日收盘</option>
+    </select>
+  </div>
+  <div class="ctl-group right">
+    <button id="btnPng" class="btn" disabled>导出 PNG</button>
+    <button id="btnLink" class="btn" disabled>复制链接</button>
+  </div>
+</section>
+
+<main>
+  <div id="status" class="status">正在加载股票列表…</div>
+
+  <section id="kpis" class="kpis" hidden></section>
+
+  <section id="chartCard" class="card" hidden>
+    <div id="chart" class="chart"></div>
+    <div id="tooltip" class="tooltip" hidden></div>
+  </section>
+
+  <section id="tableCard" class="card" hidden>
+    <h3 class="card-title">多时间尺度涨跌幅盘点 <span class="muted" id="tableNote"></span></h3>
+    <div id="retGrid" class="ret-grid"></div>
+  </section>
+
+  <section id="yearCard" class="card" hidden>
+    <h3 class="card-title">年度涨跌幅 <span class="muted">（自然年，当年为年初至今）</span></h3>
+    <div id="yearChips" class="chips"></div>
+  </section>
+
+  <section id="statCard" class="card" hidden>
+    <h3 class="card-title">分周期涨跌统计 <span class="muted">（所选区间内，按周期末收盘计算）</span></h3>
+    <div class="table-wrap"><table id="statTable" class="stat-table"></table></div>
+  </section>
+
+  <section id="phaseCard" class="card" hidden>
+    <h3 class="card-title">牛熊阶段明细 <span class="muted" id="phaseNote"></span></h3>
+    <div class="table-wrap"><table id="phaseTable" class="stat-table"></table></div>
+  </section>
+
+  <section class="card help">
+    <h3 class="card-title">说明</h3>
+    <ul>
+      <li><b>对数坐标</b>：净值倍数以区间首日收盘为 1.0x，纵轴取对数，等距离代表等比例涨跌；CAGR 为区间复合年化收益；虚线为"若全程按 CAGR 匀速增长"的参考线。</li>
+      <li><b>回撤</b>：收盘价相对此前最高收盘的跌幅；虚线标注主要回撤（≥15%）自峰到谷的历时（月）；"最大回撤"给出幅度与峰谷/修复用时。</li>
+      <li><b>牛熊划分</b>：峰谷法（ZigZag）。自阶段高点回落超过阈值即进入熊市，自阶段低点反弹超过阈值即进入牛市。为过滤短期噪音，先在月/周收盘上识别转折（"划分依据"，自动模式下区间 ≥6 年用月收盘、≥2 年用周收盘、否则用日收盘），再在相邻转折之间以日收盘精确定位峰谷。标签：阶段结束年月 · 历时 · 阶段涨跌幅（≥12个月附年化）。首段与末段为截断阶段，幅度可能小于阈值。</li>
+      <li><b>多尺度涨跌</b>：以最新收盘为基准，分别对比 N 个自然日/月/年前（取不晚于该日的最近交易日）的收盘价；"24年9月24日至今"基准为 2024-09-23 收盘。</li>
+      <li>数据来自东方财富公开行情接口，前复权价格；本页为纯静态文件，无后端，直接双击 index.html 即可在本机使用（需联网拉取行情）。</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="foot">A股 / 场内ETF 历史表现看板 · 仅供研究参考，不构成投资建议 · 股票列表更新于 <span id="listDate">—</span></footer>
+
+<script src="stocks.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
