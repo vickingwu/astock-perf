@@ -14,7 +14,7 @@
 
 ## 在 MacBook 上使用
 
-1. 在本仓库页面点 **Code → Download ZIP**（私有仓库需先登录 GitHub），或：
+1. 在本仓库页面点 **Code → Download ZIP**，或：
    ```bash
    git clone https://github.com/vickingwu/astock-perf.git
    ```
@@ -69,3 +69,11 @@ node tools/build_stock_list.js   # 重新生成 stocks.js
 - 前复权价格出现非正值时（部分高分红老股），自动改用后复权。
 
 仅供研究参考，不构成投资建议。
+
+## 全市场筛选（screen.html）
+
+仓库根目录的 `screen.html` 是一张可排序的全市场总表：沪深主板 + 创业板 + 科创板约 4,100 只非 ST、上市满 5 年的个股，用本页同一套 `app.js` 引擎逐只算出 30% / 40% / 50% 三个牛熊阈值下的年化、最大回撤、熊市均跌、牛市新高率等指标与综合排名，支持上市至今 / 近10年 / 近5年三个区间与板块筛选，每行可点回本看板核对。
+
+- 在线：<https://vickingwu.github.io/astock-perf/screen.html>（看板 <https://vickingwu.github.io/astock-perf/>）
+- 本地：双击根目录 `screen.html` 即可打开，无需联网；报告与 CSV 在 `screen/` 目录。
+- 重新拉数 / 重算 / 参数说明：详见 [screen/README.md](screen/README.md)。
