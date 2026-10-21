@@ -1,6 +1,6 @@
 # A股 / 场内ETF 历史表现看板
 
-纯静态网页，零依赖、无后端。输入任意 **A 股（沪深主板 / 科创板 / 创业板 / 北交所）或场内 ETF** 的代码、名称、拼音首字母，即可查看：
+纯静态网页，零依赖、无后端。输入任意 **A 股（沪深主板 / 科创板 / 创业板 / 北交所）或场内 ETF / LOF** 的代码、名称、拼音首字母，即可查看：
 
 | 模块 | 内容 |
 | --- | --- |
@@ -18,8 +18,8 @@
    ```bash
    git clone https://github.com/vickingwu/astock-perf.git
    ```
-2. 解压后 **双击 `index.html`**，用 Safari / Chrome 打开即可（需联网拉取行情）。
-3. 输入 `600749`、`西藏旅游` 或 `xzly` 回车；也可直接改 URL 里的参数：
+2. 解压后 **双击 `screen.html`**（主页，全市场筛选表，无需联网）；在它的筛选框里输入 6 位代码回车，即打开该标的的个股看板 `index.html`（需联网拉取行情；ETF / LOF 代码亦可）。直接打开不带参数的 `index.html` 会自动跳到 `screen.html`。
+3. 看板页内输入 `600749`、`西藏旅游` 或 `xzly` 回车切换标的；也可直接改 URL 里的参数（`index.html#s=…` 深链接照常可用）：
 
    ```
    index.html#s=1.600749&r=10y&fqt=1&th=0.2
@@ -30,15 +30,18 @@
    - `th`：牛熊阈值，如 `0.2` = 20%
    - `b`（可选）：牛熊划分依据 `M`=月收盘 `W`=周收盘 `D`=日收盘，默认按区间长度自动选择
 
+   在线版：筛选表（主页）<https://vickingwu.github.io/astock-perf/>，看板示例 <https://vickingwu.github.io/astock-perf/index.html#s=1.600749>。
+
 > 若浏览器提示无法加载数据，请确认能访问 `push2his.eastmoney.com`（公司网络 / 代理可能拦截）。
 
 ## 文件说明
 
 ```
-index.html   页面骨架
+screen.html  全市场筛选（主页）；筛选框输入 6 位代码回车 → 个股看板
+index.html   个股看板（不带 #s= 参数打开时自动跳到 screen.html）
 style.css    样式
 app.js       取数、计算（CAGR / 回撤 / ZigZag 牛熊 / 多尺度统计）与 SVG 绘图
-stocks.js    全部 A 股 + 场内 ETF 代码表（含拼音首字母），由脚本生成
+stocks.js    全部 A 股 + 场内 ETF + 场内 LOF 代码表（含拼音首字母），由脚本生成
 tools/build_stock_list.js   重新生成 stocks.js 的脚本
 ```
 
@@ -74,6 +77,6 @@ node tools/build_stock_list.js   # 重新生成 stocks.js
 
 仓库根目录的 `screen.html` 是一张可排序的全市场总表：沪深主板 + 创业板 + 科创板约 4,100 只非 ST、上市满 5 年的个股，用本页同一套 `app.js` 引擎逐只算出 30% / 40% / 50% 三个牛熊阈值下的年化、最大回撤、熊市均跌、牛市新高率等指标与综合排名，支持上市至今 / 近10年 / 近5年三个区间与板块筛选，每行可点回本看板核对。
 
-- 在线：<https://vickingwu.github.io/astock-perf/screen.html>（看板 <https://vickingwu.github.io/astock-perf/>）
+- 在线：<https://vickingwu.github.io/astock-perf/>（主页即此表；看板示例 <https://vickingwu.github.io/astock-perf/index.html#s=1.600749>）
 - 本地：双击根目录 `screen.html` 即可打开，无需联网；报告与 CSV 在 `screen/` 目录。
 - 重新拉数 / 重算 / 参数说明：详见 [screen/README.md](screen/README.md)。

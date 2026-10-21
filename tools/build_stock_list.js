@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * 生成 stocks.js：全部 A 股（沪市主板 / 科创板 / 深市主板 / 创业板 / 北交所）+ 全部场内 ETF 的代码表。
+ * 生成 stocks.js：全部 A 股（沪市主板 / 科创板 / 深市主板 / 创业板 / 北交所）+ 全部场内 ETF + 全部场内 LOF 的代码表。
  *
  * 用法：
  *   npm install            # 安装 pinyin-pro（仅构建时需要，页面本身零依赖）
  *   node tools/build_stock_list.js
  *
  * 数据来源：东方财富 clist 接口（每页最多 100 条，脚本自动翻页）。
- * 输出格式：window.STOCK_LIST = [[code, name, market(0=深/北, 1=沪), type('S'=股票,'E'=ETF), pinyinInitials], ...]
+ * 输出格式：window.STOCK_LIST = [[code, name, market(0=深/北, 1=沪), type('S'=股票,'E'=ETF,'L'=LOF), pinyinInitials], ...]
+ * 市场一律取 clist 的 f13（沪市 LOF 50xxxx 为 1、深市 LOF 16xxxx 为 0），不按代码前缀推断。
  */
 'use strict';
 
@@ -29,7 +30,11 @@ const SOURCES = [
   { type: 'S', fs: 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048' },
   // 场内 ETF：股票型 / 债券型 / 商品型 / 货币型 / 跨境型
   { type: 'E', fs: 'b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827' },
+  // 场内 LOF（沪 50xxxx / 深 16xxxx）
+  { type: 'L', fs: 'b:MK0404,b:MK0405,b:MK0406,b:MK0407' },
 ];
+const TYPE_NAME = { S: 'A股', E: 'ETF', L: 'LOF' };
+const TYPE_ORDER = { S: 0, E: 1, L: 2 };
 
 function getJSON(url, retries = 3) {
   return new Promise((resolve, reject) => {
@@ -71,7 +76,7 @@ async function fetchAll(fsParam) {
   const rows = [];
   const seen = new Set();
   for (const src of SOURCES) {
-    console.log(`fetching ${src.type === 'S' ? 'A股' : 'ETF'} ...`);
+    console.log(`fetching ${TYPE_NAME[src.type]} ...`);
     const list = await fetchAll(src.fs);
     for (const it of list) {
       const code = String(it.f12);
@@ -82,19 +87,20 @@ async function fetchAll(fsParam) {
       rows.push([code, name, Number(it.f13), src.type, pinyinFn ? pinyinFn(name.replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '')) : '']);
     }
   }
-  rows.sort((a, b) => (a[3] === b[3] ? a[0].localeCompare(b[0]) : a[3] === 'S' ? -1 : 1));
+  rows.sort((a, b) => (a[3] === b[3] ? a[0].localeCompare(b[0]) : TYPE_ORDER[a[3]] - TYPE_ORDER[b[3]]));
 
   const today = new Date().toISOString().slice(0, 10);
   const body = rows.map((r) => JSON.stringify(r)).join(',\n');
   const js = `// 自动生成，请勿手改。生成命令：node tools/build_stock_list.js\n` +
-    `// 字段：[代码, 名称, 市场(0=深/北 1=沪), 类型(S=股票 E=ETF), 拼音首字母]\n` +
+    `// 字段：[代码, 名称, 市场(0=深/北 1=沪), 类型(S=股票 E=ETF L=LOF), 拼音首字母]\n` +
     `window.STOCK_LIST_UPDATED = "${today}";\n` +
     `window.STOCK_LIST = [\n${body}\n];\n`;
   const outPath = path.join(__dirname, '..', 'stocks.js');
   fs.writeFileSync(outPath, js, 'utf8');
   const nS = rows.filter((r) => r[3] === 'S').length;
-  const nE = rows.length - nS;
-  console.log(`done: ${nS} 只股票 + ${nE} 只ETF -> ${outPath} (${(js.length / 1024).toFixed(0)} KB)`);
+  const nE = rows.filter((r) => r[3] === 'E').length;
+  const nL = rows.filter((r) => r[3] === 'L').length;
+  console.log(`done: ${nS} 只股票 + ${nE} 只ETF + ${nL} 只LOF -> ${outPath} (${(js.length / 1024).toFixed(0)} KB)`);
 })().catch((e) => {
   console.error('failed:', e.message);
   process.exit(1);

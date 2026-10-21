@@ -17,7 +17,7 @@
   .seg button + button { border-left: 1px solid #d1d5db; }
   .seg button.on { background: var(--blue); color: #fff; }
   .boardSeg { display: inline-flex; gap: 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; padding: 5px 10px; }
-  input[type=text] { padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; width: 260px; font-size: 13px; }
+  input[type=text] { padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; width: 520px; max-width: 100%; font-size: 13px; }
   label.chk { display: inline-flex; align-items: center; gap: 4px; color: var(--axis); }
   .card { background: #fff; border: 1px solid var(--grid); border-radius: 8px; margin: 0 20px 14px; padding: 12px; }
   .card h3 { margin: 0 0 8px; font-size: 14px; color: #111827; }
@@ -62,7 +62,7 @@
   <div class="seg" id="thSeg"><button data-th="0.3" class="on">30%</button><button data-th="0.4">40%</button><button data-th="0.5">50%</button></div>
   <span>板块</span>
   <span class="boardSeg" id="boardSeg"><label class="chk"><input type="checkbox" data-board="主板" checked> 主板</label><label class="chk"><input type="checkbox" data-board="创业板" checked> 创业板</label><label class="chk"><input type="checkbox" data-board="科创板" checked> 科创板</label></span>
-  <input type="text" id="filter" placeholder="筛选：代码 / 名称 / 行业" aria-label="筛选">
+  <input type="text" id="filter" autocomplete="off" spellcheck="false" placeholder="筛选：代码 / 名称 / 行业 — 输入 6 位代码回车打开个股看板（ETF / LOF 亦可）" aria-label="筛选；输入 6 位代码回车打开个股看板">
   <label class="chk"><input type="checkbox" id="onlyTop"> 只看综合榜 Top 50</label>
   <label class="chk"><input type="checkbox" id="onlyPareto"> 只看 Pareto 前沿</label>
   <label class="chk"><input type="checkbox" id="logX"> 散点 x 轴 log(1+年化)</label>
@@ -235,6 +235,21 @@
   $('tbl').querySelector('thead').addEventListener('click', (e) => { const th = e.target.closest('th'); if (!th) return; const key = th.dataset.key; if (state.sortKey === key) state.sortDir = -state.sortDir; else { state.sortKey = key; const c = COLS.find((x) => x.key === key); state.sortDir = (c && (c.str || /rank|Rank|code|listDate|ddDownDays|ddRec/.test(key))) ? 1 : -1; } renderTable(); });
   let ft = null;
   $('filter').addEventListener('input', (e) => { clearTimeout(ft); ft = setTimeout(() => { state.filter = e.target.value; renderTable(); }, 120); });
+  // 筛选框兼作跳转框：回车时，6 位代码（可带 sh/sz 前缀）直接打开个股看板——市场优先取表内 secid，表外代码（ETF / LOF / 北交所 / 新股）按前缀或与 app.js inferMarket 相同的规则推断；
+  // 非代码文本且筛选结果恰好 1 行时打开该行；其余情况只筛选不跳转
+  function jumpTarget(text) {
+    const q = String(text || '').trim();
+    if (!q) return null;
+    const m = q.match(/^(sh|sz)?(\d{6})$/i);
+    if (m) {
+      const code = m[2], hit = DATA.find((r) => r.code === code);
+      const secid = hit ? hit.secid : (m[1] ? (m[1].toLowerCase() === 'sh' ? 1 : 0) : (/^[569]/.test(code) ? 1 : 0)) + '.' + code;
+      return DASH_BASE + '#s=' + secid + '&r=' + state.win + '&fqt=2&th=' + state.th;
+    }
+    const list = visibleRows();
+    return list.length === 1 ? dash(list[0], state.th) : null;
+  }
+  $('filter').addEventListener('keydown', (e) => { if (e.key !== 'Enter') return; clearTimeout(ft); state.filter = e.target.value; renderTable(); const url = jumpTarget(e.target.value); if (url) location.href = url; });
   $('onlyTop').addEventListener('change', (e) => { state.onlyTop = e.target.checked; renderTable(); });
   $('onlyPareto').addEventListener('change', (e) => { state.onlyPareto = e.target.checked; renderTable(); });
   $('logX').addEventListener('change', (e) => { state.logX = e.target.checked; renderScatter(); });
@@ -248,7 +263,7 @@
   $('banner').className = 'banner' + (isTx ? ' warn' : '');
   $('banner').innerHTML = '<b>' + esc(isTx ? '⚠️ 数据源与口径说明' : '口径说明') + '</b>：' + esc(META.sourceNote) + ' 股票池为沪深主板 + 创业板 + 科创板（除 ST / 退、除北交所、上市满 5 年），排名与百分位在全部板块的入选个股内统一计算；「板块」勾选只筛选显示的行。' + (META.universeNote ? '<br><b>股票池数据缺口</b>：' + esc(META.universeNote.replace(/`[^`]*`/g, (s) => s.slice(1, -1))) : '');
   renderTable(); renderScatter();
-  window.__SCREEN__ = { state, DATA, VIEWS, COLS, META, KEYS, boardRows, visibleRows }; // 便于自动化核对
+  window.__SCREEN__ = { state, DATA, VIEWS, COLS, META, KEYS, boardRows, visibleRows, jumpTarget }; // 便于自动化核对
 })();
 </script>
 </body>

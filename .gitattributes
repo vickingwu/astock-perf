@@ -1,0 +1,2 @@
+# screen/metrics_*.csv are written with UTF-8 BOM + CRLF for Excel; store and check out byte-for-byte (no EOL conversion).
+screen/*.csv -text

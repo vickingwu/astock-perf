@@ -98,11 +98,13 @@
 
   function marketTag(it) {
     if (it.type === 'E') return { txt: 'ETF', cls: 'etf' };
+    if (it.type === 'L') return { txt: 'LOF', cls: 'etf' };
     if (it.market === 1) return { txt: '沪A', cls: '' };
     if (/^(8|4|92)/.test(it.code)) return { txt: '北A', cls: 'bj' };
     return { txt: '深A', cls: '' };
   }
   function inferMarket(code) { return /^[569]/.test(code) ? 1 : 0; }
+  const TYPE_ORDER = { S: 0, E: 1, L: 2 }; // 搜索结果同分时：股票 → ETF → LOF
 
   function searchLocal(q) {
     q = normName(q);
@@ -121,8 +123,16 @@
       else if (it.py.indexOf(q) >= 0) sc = 40;
       if (sc >= 0) res.push({ it, sc });
     }
-    res.sort((a, b) => b.sc - a.sc || (a.it.type === b.it.type ? a.it.code.localeCompare(b.it.code) : a.it.type === 'S' ? -1 : 1));
+    res.sort((a, b) => b.sc - a.sc || (a.it.type === b.it.type ? a.it.code.localeCompare(b.it.code) : TYPE_ORDER[a.it.type] - TYPE_ORDER[b.it.type]));
     return res.slice(0, 14).map((r) => r.it);
+  }
+
+  // 联想接口返回项 → 类型：A 股 / 北交所 = 'S'；沪深场内基金（MktNum 0/1）名称含 ETF = 'E'，其余（LOF 等）= 'L'；场外基金、债券等不收
+  function classifyRemote(d) {
+    const mk = +d.MktNum; if (mk !== 0 && mk !== 1) return null;
+    if (d.Classify === 'AStock' || d.Classify === 'NEEQ') return 'S';
+    if (d.Classify === 'Fund') return /ETF/i.test(d.Name) ? 'E' : 'L';
+    return null;
   }
 
   // 本地列表没有时，退回东方财富联想接口（覆盖新上市品种）
@@ -132,12 +142,9 @@
     const data = (j && j.QuotationCodeTable && j.QuotationCodeTable.Data) || [];
     const out = [];
     for (const d of data) {
-      const mk = +d.MktNum; if (mk !== 0 && mk !== 1) continue;
-      let type = null;
-      if (d.Classify === 'AStock' || d.Classify === 'NEEQ') type = 'S';
-      else if (d.Classify === 'Fund' && /ETF/i.test(d.Name)) type = 'E';
+      const type = classifyRemote(d);
       if (!type) continue;
-      out.push({ code: d.Code, name: cleanName(d.Name), market: mk, type, py: (d.PinYin || '').toLowerCase(), nn: normName(d.Name), remote: true });
+      out.push({ code: d.Code, name: cleanName(d.Name), market: +d.MktNum, type, py: (d.PinYin || '').toLowerCase(), nn: normName(d.Name), remote: true });
     }
     return out;
   }
@@ -846,7 +853,7 @@
           const r = await searchRemote(q);
           if (my !== seq) return;
           items = r; active = r.length ? 0 : -1;
-          if (!r.length) { box.innerHTML = '<div class="empty">未找到匹配的 A 股 / ETF。可直接输入 6 位代码回车。</div>'; box.hidden = false; }
+          if (!r.length) { box.innerHTML = '<div class="empty">未找到匹配的 A 股 / ETF / LOF。可直接输入 6 位代码回车。</div>'; box.hidden = false; }
           else render();
         } catch (e) { if (my === seq) { box.innerHTML = '<div class="empty">未找到；联想接口不可用。</div>'; } }
       }
@@ -913,7 +920,7 @@
 
   // ------------------------------------------------------------------ init
   function init() {
-    $('listDate').textContent = (window.STOCK_LIST_UPDATED || '—') + '（' + LIST.filter((x) => x.type === 'S').length + ' 只股票 / ' + LIST.filter((x) => x.type === 'E').length + ' 只ETF）';
+    $('listDate').textContent = (window.STOCK_LIST_UPDATED || '—') + '（' + LIST.filter((x) => x.type === 'S').length + ' 只股票 / ' + LIST.filter((x) => x.type === 'E').length + ' 只ETF / ' + LIST.filter((x) => x.type === 'L').length + ' 只LOF）';
     bindSearch(); bindControls();
     let sym = applyHashParams(readHash());
     if (!sym) {
@@ -934,7 +941,7 @@
 
   // Node 环境（批量脚本）：只导出计算函数，不触碰 DOM
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { analyze, computeHorizons, periodStats, yearlyReturns, segmentPhases, zigzagPivots, parseYMD, fmtDate, fmtYM, pct, fmtDur, fmtDurCN, fmtMult, cleanName, addMonths, idxOnOrAfter, idxOnOrBefore, ymd, tToDate };
+    module.exports = { analyze, computeHorizons, periodStats, yearlyReturns, segmentPhases, zigzagPivots, parseYMD, fmtDate, fmtYM, pct, fmtDur, fmtDurCN, fmtMult, cleanName, addMonths, idxOnOrAfter, idxOnOrBefore, ymd, tToDate, classifyRemote, inferMarket };
     return;
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
