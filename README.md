@@ -38,6 +38,7 @@
 
 ```
 screen.html  全市场筛选（主页）；筛选框输入 6 位代码回车 → 个股看板
+screen/data/   全市场筛选的数据文件（screen.html 按需加载，须与 screen.html 一同保留）
 index.html   个股看板（不带 #s= 参数打开时自动跳到 screen.html）
 style.css    样式
 app.js       取数、计算（CAGR / 回撤 / ZigZag 牛熊 / 多尺度统计）与 SVG 绘图
@@ -76,5 +77,5 @@ node tools/build_stock_list.js   # 重新生成 stocks.js
 仓库根目录的 `screen.html` 是一张可排序的全市场总表：沪深主板 + 创业板 + 科创板约 4,100 只非 ST、上市满 5 年的个股，用本页同一套 `app.js` 引擎逐只算出 30% / 40% / 50% 三个牛熊阈值下的年化、最大回撤、熊市均跌、牛市新高率等指标与综合排名，支持上市至今 / 近10年 / 近5年三个区间与板块筛选，每行可点回本看板核对。
 
 - 在线：<https://vickingwu.github.io/astock-perf/>（主页即此表；看板示例 <https://vickingwu.github.io/astock-perf/index.html#s=1.600749>）
-- 本地：双击根目录 `screen.html` 即可打开，无需联网；报告与 CSV 在 `screen/` 目录。
+- 本地：双击根目录 `screen.html` 即可打开，无需联网（数据在 `screen/data/`，首屏只加载当前区间 / 阈值的文件，切换时再加载）；报告与 CSV 在 `screen/` 目录。
 - 重新拉数 / 重算 / 参数说明：详见 [screen/README.md](screen/README.md)。

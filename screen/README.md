@@ -19,7 +19,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `screen.html`（仓库根目录） | 零依赖单文件网页：区间 × 阈值 × 板块切换、列头排序、文本筛选、年化 × 最大回撤散点、每行链接看板。双击即可本地打开（file://），约 5 MB |
+| `screen.html`（仓库根目录） | 零依赖网页壳（约 34 KB）：区间 × 阈值 × 板块切换、列头排序、文本筛选、年化 × 最大回撤散点（canvas）、每行链接看板；表格每次渲染 100 行（滚动到底自动追加，或点「显示全部 N 行」）。数据按需从 `screen/data/*.js` 加载：首屏 `meta.js + all.js + all_th30.js` ≈ 1.1 MB 原始 / Pages gzip 后 ≈ 350 KB；切换区间 / 阈值时再加载对应文件；仍可双击本地打开（file://） |
+| `screen/data/`（13 个 `.js`） | 筛选表数据，由 `tools/screen_report.js` 生成、随仓库提交，须与 `screen.html` 一同保留：`meta.js`（META / KEYS / 行业字典）；`all.js` / `10y.js` / `5y.js`（各区间基础字段，按入选个股下标对齐，不在窗口的为 `null`）；`<区间>_th30.js` / `_th40.js` / `_th50.js`（各阈值 18 项指标，对齐方式相同）。全部 13 个文件约 4.5 MB 原始 / 1.3 MB gzip |
 | `screen/report.md` | 中文报告：版本说明、概览、板块构成、各阈值综合榜 Top 50 与稳健 / 进攻 / 穿越榜 Top 20、同窗口榜、Pareto 前沿、跨阈值交集、合理性校验、口径与局限 |
 | `screen/metrics_th30.csv` / `metrics_th40.csv` / `metrics_th50.csv` | 上市至今全部股票池（含剔除行与剔除原因）× 单阈值全部指标，UTF-8 BOM，Excel 直接打开；`板块` 为第 4 列 |
 | `screen/metrics_w10y.csv` / `metrics_w5y.csv` | 同窗口榜：一行一只窗口入选个股，三阈值列组（`30%_` / `40%_` / `50%_` 前缀） |
@@ -44,7 +45,7 @@ nohup node tools/fetch_watchdog.js --source eastmoney > screen/out/watchdog_stdo
 node tools/screen_all.js --compute-only                      # 数据终点 auto = 缓存上证末根 K 线日期
 node tools/screen_all.js --compute-only --data-end 2026-10-15 # 或固定某个交易日（所有个股与指数都截到这一天）
 
-# 3. 报告 + 网页 → screen/report.md, screen.html
+# 3. 报告 + 网页 → screen/report.md, screen.html, screen/data/*.js
 node tools/screen_report.js
 
 # 4. 校验（逐条 PASS/FAIL，写 screen/out/screen_verify.log；退出码 1 = 有 FAIL）
@@ -101,4 +102,4 @@ CAGR / 最大回撤 / ZigZag 牛熊划分的定义见仓库根目录 README 的�
 
 ## 校验
 
-`node tools/screen_verify.js [--prev <上一版 metrics_*.csv 所在目录>] [--expect-data-end YYYY-MM-DD]` 输出 `screen/out/screen_verify.log`：股票池分段与板块标签、`run_meta` 一致性、规则一致性（每只 × 每视图 × 每阈值）、独立重算抽样、排名 1..n / Pareto、数据终点一致、CSV 结构（BOM / CRLF / 板块列 / 链接前缀）、`report.md` 表格与榜单行数、`screen.html` 结构与可编译性、文案、以及（给出 `--prev` 时）与上一版入选个股的逐字段回归。
+`node tools/screen_verify.js [--prev <上一版 metrics_*.csv 所在目录>] [--expect-data-end YYYY-MM-DD]` 输出 `screen/out/screen_verify.log`：股票池分段与板块标签、`run_meta` 一致性、规则一致性（每只 × 每视图 × 每阈值）、独立重算抽样、排名 1..n / Pareto、数据终点一致、CSV 结构（BOM / CRLF / 板块列 / 链接前缀）、`report.md` 表格与榜单行数、`screen.html` 壳 + `screen/data/*.js` 结构 / 计数 / 名次 / 行业字典 / 首屏 gzip 体积、文案、以及（给出 `--prev` 时）与上一版入选个股的逐字段回归。
