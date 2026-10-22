@@ -12,7 +12,7 @@
  *   D. 数据终点：results / benchmarks / CSV / report.md / screen.html 的数据终点一致
  *   S. CSV：BOM、CRLF、行数、板块列（第 4 列）、无 NaN/undefined/null、列数一致、看板链接前缀 ../index.html#s=
  *   P. report.md：表格竖线一致；5 × 综合榜 Top 50 各 50 行；4 × 窗口 Top 20；15 × 分榜 Top 20；含「板块」列；20 只校验股均「入选」；文案
- *   H. screen.html 壳：< 60 KB、无 <link href / fetch(、通过 <script> 注入加载 screen/data/、无残留占位符、DASH_BASE './index.html'、含 #status、IME 保护、板块多选、脚本可编译、页脚全局排名说明；
+ *   H. screen.html 壳：< 60 KB、无 <link href / fetch(、通过 <script> 注入加载 screen/data/、无残留占位符、DASH_BASE './index.html'、含 #status、<canvas id="scatter">、分页（PAGE = 100 + #showAll）、IME 保护、板块多选、脚本可编译、页脚全局排名说明；
  *      screen/data：恰好 13 个文件（meta / all / 10y / 5y / 各区间 _th30|40|50），KEYS 结构、行数 / 下标对齐 / 名次 1..n / 行业字典 / 抽值与 results.json 一致；首屏 gzip（壳 + meta + all + all_th30）≤ 500 KB
  *   E. 文案：report.md / screen.html / screen/README.md / screen/data/meta.js 不含任何免责声明 / 出处 / 用途类套话（词表 BAD_WORDS，以 \u 转义存放）
  *   V. --prev <dir>：与上一版 metrics_th30|40|50.csv / metrics_w10y|w5y.csv 逐只回归（入选个股的 年化 / 最大回撤 / 熊市均跌 等字段逐字相同；名次允许变化）
@@ -440,6 +440,8 @@ const md = fs.readFileSync(path.join(PUB, 'report.md'), 'utf8');
   check(!/__META__|__KEYS__|__DATA__|__WIN__|__DATA_KB__|__DASH_BASE__/.test(html), 'H. screen.html: no leftover template placeholders');
   check(html.includes("const DASH_BASE = './index.html';"), "H. screen.html: DASH_BASE = './index.html'");
   check(html.includes('id="status"'), 'H. screen.html: #status line present');
+  check(html.includes('<canvas id="scatter"'), 'H. screen.html: scatter is a <canvas id="scatter">');
+  check(html.includes('id="showAll"') && html.includes('const PAGE = 100'), 'H. screen.html: paged table (const PAGE = 100 + #showAll button)');
   check(html.includes('if (e.isComposing || e.keyCode === 229) return;'), 'H. screen.html: IME guard on Enter in the jump box');
   check(['data-win="all"', 'data-win="10y"', 'data-win="5y"', 'id="winSeg"', 'id="thSeg"', 'data-th="0.3"', 'data-th="0.4"', 'data-th="0.5"'].every((s) => html.includes(s)), 'H. screen.html: 区间 / 阈值 toggle markup present');
   check(html.includes('id="boardSeg"') && ['data-board="主板"', 'data-board="创业板"', 'data-board="科创板"'].every((s) => html.includes(s)), 'H. screen.html: 板块 multi-select (boardSeg + 3 data-board checkboxes)');
