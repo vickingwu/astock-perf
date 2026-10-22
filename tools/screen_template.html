@@ -249,7 +249,7 @@
     const list = visibleRows();
     return list.length === 1 ? dash(list[0], state.th) : null;
   }
-  $('filter').addEventListener('keydown', (e) => { if (e.key !== 'Enter') return; clearTimeout(ft); state.filter = e.target.value; renderTable(); const url = jumpTarget(e.target.value); if (url) location.href = url; });
+  $('filter').addEventListener('keydown', (e) => { if (e.key !== 'Enter') return; if (e.isComposing || e.keyCode === 229) return; clearTimeout(ft); state.filter = e.target.value; renderTable(); const url = jumpTarget(e.target.value); if (url) location.href = url; });
   $('onlyTop').addEventListener('change', (e) => { state.onlyTop = e.target.checked; renderTable(); });
   $('onlyPareto').addEventListener('change', (e) => { state.onlyPareto = e.target.checked; renderTable(); });
   $('logX').addEventListener('change', (e) => { state.logX = e.target.checked; renderScatter(); });

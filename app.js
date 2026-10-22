@@ -864,6 +864,7 @@
       if (e.key === 'ArrowDown') { if (items.length) { active = (active + 1) % items.length; render(); } e.preventDefault(); }
       else if (e.key === 'ArrowUp') { if (items.length) { active = (active - 1 + items.length) % items.length; render(); } e.preventDefault(); }
       else if (e.key === 'Enter') {
+        if (e.isComposing || e.keyCode === 229) return; // 输入法组词中按回车（选候选词）不触发加载
         e.preventDefault();
         if (items.length && active >= 0) pick(active);
         else {
