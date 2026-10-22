@@ -12,8 +12,9 @@
  *   D. 数据终点：results / benchmarks / CSV / report.md / screen.html 的数据终点一致
  *   S. CSV：BOM、CRLF、行数、板块列（第 4 列）、无 NaN/undefined/null、列数一致、看板链接前缀 ../index.html#s=
  *   P. report.md：表格竖线一致；5 × 综合榜 Top 50 各 50 行；4 × 窗口 Top 20；15 × 分榜 Top 20；含「板块」列；20 只校验股均「入选」；文案
- *   H. screen.html：< 8 MB、无 <script src / <link href / fetch(、DASH_BASE './index.html'、数据块可解析、含 board、板块多选、脚本可编译、页脚全局排名说明
- *   E. 文案：report.md / screen.html / screen/README.md 不含任何免责声明 / 出处 / 用途类套话（词表 BAD_WORDS，以 \u 转义存放）
+ *   H. screen.html 壳：< 60 KB、无 <link href / fetch(、通过 <script> 注入加载 screen/data/、无残留占位符、DASH_BASE './index.html'、含 #status、IME 保护、板块多选、脚本可编译、页脚全局排名说明；
+ *      screen/data：恰好 13 个文件（meta / all / 10y / 5y / 各区间 _th30|40|50），KEYS 结构、行数 / 下标对齐 / 名次 1..n / 行业字典 / 抽值与 results.json 一致；首屏 gzip（壳 + meta + all + all_th30）≤ 500 KB
+ *   E. 文案：report.md / screen.html / screen/README.md / screen/data/meta.js 不含任何免责声明 / 出处 / 用途类套话（词表 BAD_WORDS，以 \u 转义存放）
  *   V. --prev <dir>：与上一版 metrics_th30|40|50.csv / metrics_w10y|w5y.csv 逐只回归（入选个股的 年化 / 最大回撤 / 熊市均跌 等字段逐字相同；名次允许变化）
  * 用法（仓库根目录）：node tools/screen_verify.js [--prev <dir>] [--expect-data-end YYYY-MM-DD]
  */
@@ -21,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const zlib = require('zlib');
 const E = require('../app.js');
 
 const ROOT = path.join(__dirname, '..');
@@ -428,45 +430,112 @@ const md = fs.readFileSync(path.join(PUB, 'report.md'), 'utf8');
   check(['605098', '605167', '000333', '601702', '603662', '605198', '600519', '002595', '002832', '603871'].every((c) => secC.includes('| ' + c + ' |')), 'P. report.md 板块构成 table C lists the 10 main-board v2.1 Top 10 codes');
 }
 
-// ---------------------------------------------------------------- H. screen.html
+// ---------------------------------------------------------------- H. screen.html shell + screen/data/*.js
 {
   const hp = path.join(ROOT, 'screen.html');
   const html = fs.readFileSync(hp, 'utf8');
   const bytes = Buffer.byteLength(html);
-  check(bytes < 8388608, 'H. screen.html bytes ' + bytes + ' < 8 MB (' + (bytes / 1048576).toFixed(2) + ' MB)');
-  check(!/<script\s+src=|<link\s+href=|fetch\(/.test(html), 'H. screen.html: no <script src / <link href / fetch(');
+  check(bytes < 61440, 'H. screen.html shell bytes ' + bytes + ' < 60 KB (' + (bytes / 1024).toFixed(1) + ' KB)');
+  check(!/<link\s+href=|fetch\(/.test(html) && html.includes("'screen/data/'"), 'H. screen.html: no <link href / fetch(; loads screen/data/ via injected <script>');
+  check(!/__META__|__KEYS__|__DATA__|__WIN__|__DATA_KB__|__DASH_BASE__/.test(html), 'H. screen.html: no leftover template placeholders');
   check(html.includes("const DASH_BASE = './index.html';"), "H. screen.html: DASH_BASE = './index.html'");
+  check(html.includes('id="status"'), 'H. screen.html: #status line present');
+  check(html.includes('if (e.isComposing || e.keyCode === 229) return;'), 'H. screen.html: IME guard on Enter in the jump box');
   check(['data-win="all"', 'data-win="10y"', 'data-win="5y"', 'id="winSeg"', 'id="thSeg"', 'data-th="0.3"', 'data-th="0.4"', 'data-th="0.5"'].every((s) => html.includes(s)), 'H. screen.html: 区间 / 阈值 toggle markup present');
   check(html.includes('id="boardSeg"') && ['data-board="主板"', 'data-board="创业板"', 'data-board="科创板"'].every((s) => html.includes(s)), 'H. screen.html: 板块 multi-select (boardSeg + 3 data-board checkboxes)');
   check(html.includes('排名、百分位、综合分在全部板块（沪深主板 + 创业板 + 科创板）的入选个股内统一计算；板块筛选只影响显示的行，不重新排名'), 'H. screen.html footer states ranks are global over all boards');
   check(html.includes(LEGEND21), 'H. screen.html contains v2.1 legend');
-  const grab = (name) => { const m = html.match(new RegExp('const ' + name + ' = (.*?);(?:[ \\t]*//[^\\n]*)?\\n')); try { return m ? JSON.parse(m[1]) : null; } catch (e) { out('  ' + name + ' parse error: ' + e.message); return null; } };
-  const KEYS = grab('KEYS'), DATA_P = grab('DATA_P'), WIN_P = grab('WIN_P'), META = grab('META');
-  check(KEYS && DATA_P && WIN_P && META, 'H. screen.html: KEYS / DATA_P / WIN_P / META extracted and JSON-parsable');
-  if (KEYS && DATA_P && WIN_P && META) {
-    const bi = KEYS.base.indexOf('board');
-    check(bi === 3 && KEYS.winBase.length === KEYS.base.length - 6 && !KEYS.winBase.includes('board'), 'H. KEYS.base has board at index 3; winBase = base.slice(6) (' + KEYS.winBase.length + ' = ' + KEYS.base.length + ' − 6)');
-    check(DATA_P.length === elig.length && DATA_P.every((a) => a.length === KEYS.base.length + 3 && BOARDS.includes(a[bi])), 'H. DATA_P rows ' + DATA_P.length + ' === eligible ' + elig.length + ', each with base + 3 threshold arrays and a valid board');
-    const bcH = {}; for (const a of DATA_P) bcH[a[bi]] = (bcH[a[bi]] || 0) + 1;
-    check(BOARDS.every((b) => bcH[b] === elig.filter((r) => r.board === b).length), 'H. DATA_P board counts ' + JSON.stringify(bcH) + ' match eligible per board');
-    const wOk = WINDOWS.every((W) => WIN_P[W.key].length === elig.length && WIN_P[W.key].filter(Boolean).length === wElig(W).length && WIN_P[W.key].filter(Boolean).every((a) => a.length === KEYS.winBase.length + 3));
-    check(wOk, 'H. WIN_P non-null counts match window eligible (' + WINDOWS.map((W) => W.key + ' ' + WIN_P[W.key].filter(Boolean).length + '/' + wElig(W).length).join(', ') + ') and aligned to DATA_P');
-    const rankIdx = KEYS.th.indexOf('rank');
-    const r30 = DATA_P.map((a) => a[KEYS.base.length][rankIdx]).sort((a, b) => a - b);
-    check(r30.every((v, i) => v === i + 1), 'H. DATA_P 30% ranks are 1..' + elig.length);
-    check(META.version === String(meta.version).replace(/^v/, '') && META.dataEndDate === DATA_END && META.eligible === elig.length && META.universe === results.length && META.boards && BOARDS.every((b) => META.boards[b] && META.boards[b].eligible === elig.filter((r) => r.board === b).length), 'H. META: version ' + META.version + ', dataEndDate ' + META.dataEndDate + ', universe ' + META.universe + ', eligible ' + META.eligible + ', boards ' + JSON.stringify(META.boards));
-    check(META.benchmarks && ['all'].concat(WINDOWS.map((W) => W.key)).every((k) => META.benchmarks[k] && META.benchmarks[k].length === 2), 'H. META.benchmarks all/10y/5y × 2');
-  }
   const scr = html.match(/<script>([\s\S]*?)<\/script>/);
   let compiled = false; try { new vm.Script(scr[1]); compiled = true; } catch (e) { out('  script compile error: ' + e.message); }
   check(compiled, 'H. screen.html inline script compiles (vm.Script)');
   check(html.includes("'&r=' + state.win"), 'H. screen.html dash() uses state.win as 看板 range');
   check(html.includes('state.boards.has(r.board)'), 'H. screen.html filters rows by state.boards');
+  // screen/data/*.js：纯 JS 赋值文件，在空 window 沙箱里执行后读取
+  const DATA_DIR = path.join(PUB, 'data');
+  const loadJS = (f) => { const ctx = { window: {} }; vm.runInNewContext(fs.readFileSync(path.join(DATA_DIR, f), 'utf8'), ctx); return ctx.window; };
+  const VIEW_KEYS = ['all'].concat(WINDOWS.map((W) => W.key));
+  const thName = (w, T) => w + '_th' + Math.round(+T * 100) + '.js';
+  const expectFiles = ['meta.js'].concat(VIEW_KEYS.map((w) => w + '.js')).concat(VIEW_KEYS.flatMap((w) => THS.map((T) => thName(w, T)))).sort();
+  const haveFiles = exists(DATA_DIR) ? fs.readdirSync(DATA_DIR).filter((f) => f.endsWith('.js')).sort() : [];
+  check(haveFiles.length === 13 && JSON.stringify(haveFiles) === JSON.stringify(expectFiles), 'H. screen/data has exactly the 13 files ' + expectFiles.join(' ') + ' (found ' + haveFiles.length + ': ' + haveFiles.join(' ') + ')');
+  const rd4 = (x) => (x == null || !isFinite(x) ? null : Math.round(x * 1e4) / 1e4);
+  const TH18 = ['nBull', 'nBear', 'nCB', 'nBQ', 'bearSrc', 'avgBearRet', 'avgBullRet', 'deepestBearRet', 'bullNewHighRate', 'bearHigherLowRate', 'bullTimeShare', 'curBull', 'curRet', 'composite', 'rank', 'steadyRank', 'attackRank', 'crossRank'];
+  let META = null, KEYS = null;
+  try { const m = loadJS('meta.js').__SCREEN_META; META = m && m.META; KEYS = m && m.KEYS; } catch (e) { out('  meta.js load error: ' + e.message); }
+  check(META && KEYS && Array.isArray(KEYS.base) && Array.isArray(KEYS.th), 'H. meta.js defines window.__SCREEN_META.{META,KEYS}');
+  if (META && KEYS) {
+    check(KEYS.base[3] === 'board' && JSON.stringify(KEYS.winBase) === JSON.stringify(KEYS.base.slice(6)) && !KEYS.winBase.includes('board'), 'H. KEYS.base has board at index 3; winBase deep-equals base.slice(6) (' + KEYS.winBase.length + ' = ' + KEYS.base.length + ' − 6)');
+    check(JSON.stringify(KEYS.th) === JSON.stringify(TH18), 'H. KEYS.th is the 18-name threshold list in order');
+    check(!KEYS.base.includes('vol') && !KEYS.base.includes('roll5yMedian') && !KEYS.base.includes('roll5yWin'), 'H. KEYS.base carries no never-read fields (vol / roll5yMedian / roll5yWin)');
+    check(KEYS.dict && KEYS.dict.industry === 'industries' && Array.isArray(META.industries) && META.industries.length > 0, 'H. KEYS.dict.industry === industries and META.industries is a non-empty array (' + (META.industries || []).length + ' entries)');
+    check(META.version === String(meta.version).replace(/^v/, '') && META.dataEndDate === DATA_END && META.eligible === elig.length && META.universe === results.length && META.boards && BOARDS.every((b) => META.boards[b] && META.boards[b].eligible === elig.filter((r) => r.board === b).length), 'H. META: version ' + META.version + ', dataEndDate ' + META.dataEndDate + ', universe ' + META.universe + ', eligible ' + META.eligible + ', boards ' + JSON.stringify(META.boards));
+    check(META.benchmarks && VIEW_KEYS.every((k) => META.benchmarks[k] && META.benchmarks[k].length === 2), 'H. META.benchmarks all/10y/5y × 2');
+    const ki = (k) => KEYS.base.indexOf(k), rankIdx = KEYS.th.indexOf('rank'), abrIdx = KEYS.th.indexOf('avgBearRet'), compIdx = KEYS.th.indexOf('composite');
+    const dataOf = (f) => { const d = loadJS(f).__SCREEN_DATA || {}; return d[f.replace(/\.js$/, '')]; };
+    // all.js
+    const ALL = dataOf('all.js') || [];
+    const allBad = [];
+    if (ALL.length !== elig.length) allBad.push('length ' + ALL.length + ' != ' + elig.length);
+    for (let i = 0; i < Math.min(ALL.length, elig.length); i++) {
+      const a = ALL[i], r = elig[i];
+      if (!a || a.length !== KEYS.base.length) { allBad.push(i + ' row length'); continue; }
+      if (a[0] !== r.code || a[2] !== r.secid || a[3] !== r.board || META.industries[a[4]] !== (r.industry || '')) allBad.push(i + ' identity/industry');
+      if (a[ki('cagr')] !== rd4(r.cagr) || a[ki('maxDD')] !== rd4(r.maxDD)) allBad.push(i + ' cagr/maxDD');
+    }
+    check(allBad.length === 0, 'H. all.js: ' + ALL.length + ' rows === eligible ' + elig.length + ', each ' + KEYS.base.length + ' values; code / secid / board / industry(dict) / cagr / maxDD match results.json (' + allBad.length + ' problems' + (allBad.length ? ': ' + allBad.slice(0, 5).join('; ') : '') + ')');
+    const bcH = {}; for (const a of ALL) if (a) bcH[a[3]] = (bcH[a[3]] || 0) + 1;
+    check(BOARDS.every((b) => bcH[b] === elig.filter((r) => r.board === b).length), 'H. all.js board counts ' + JSON.stringify(bcH) + ' match eligible per board');
+    // window base files + all threshold files
+    for (const w of VIEW_KEYS) {
+      const W = WINDOWS.find((x) => x.key === w);
+      const view = (r) => (w === 'all' ? r : r.windows && r.windows[w] ? r.windows[w] : null);
+      const nExp = w === 'all' ? elig.length : wElig(W).length;
+      if (w !== 'all') {
+        const B = dataOf(w + '.js') || [];
+        const bad = [];
+        if (B.length !== elig.length) bad.push('length ' + B.length);
+        let nn = 0;
+        for (let i = 0; i < Math.min(B.length, elig.length); i++) {
+          const a = B[i], v = view(elig[i]);
+          if ((a != null) !== (v != null)) { bad.push(i + ' null-ness'); continue; }
+          if (!a) continue;
+          nn++;
+          if (a.length !== KEYS.winBase.length) bad.push(i + ' row length ' + a.length);
+          else if (a[KEYS.winBase.indexOf('cagr')] !== rd4(v.cagr)) bad.push(i + ' cagr');
+        }
+        check(bad.length === 0 && nn === nExp, 'H. ' + w + '.js: length ' + B.length + ' (aligned to eligible), non-null ' + nn + ' === window eligible ' + nExp + ', each ' + KEYS.winBase.length + ' values, cagr matches (' + bad.length + ' problems' + (bad.length ? ': ' + bad.slice(0, 5).join('; ') : '') + ')');
+      }
+      for (const T of THS) {
+        const f = thName(w, T), A = dataOf(f) || [];
+        const bad = [];
+        if (A.length !== elig.length) bad.push('length ' + A.length);
+        const ranks = [];
+        for (let i = 0; i < Math.min(A.length, elig.length); i++) {
+          const a = A[i], v = view(elig[i]);
+          if ((a != null) !== (v != null)) { bad.push(i + ' null-ness'); continue; }
+          if (!a) continue;
+          if (a.length !== 18) { bad.push(i + ' length ' + a.length); continue; }
+          const t = v.th[T];
+          if (a[abrIdx] !== rd4(t.avgBearRet) || a[compIdx] !== rd4(t.composite) || a[rankIdx] !== t.rank) bad.push(i + ' avgBearRet/composite/rank');
+          ranks.push(a[rankIdx]);
+        }
+        ranks.sort((x, y) => x - y);
+        const ranksOk = ranks.length === nExp && ranks.every((v, i) => v === i + 1);
+        check(bad.length === 0 && ranksOk, 'H. ' + f + ': aligned to eligible (' + A.length + '), ' + ranks.length + ' non-null × 18 values, ranks 1..' + nExp + ' (' + ranksOk + '), avgBearRet / composite / rank match results.json (' + bad.length + ' problems' + (bad.length ? ': ' + bad.slice(0, 5).join('; ') : '') + ')');
+      }
+    }
+  }
+  // 首屏传输量：Pages 走 gzip，壳 + meta.js + all.js + all_th30.js 压缩后 ≤ 500 KB
+  const startupFiles = ['meta.js', 'all.js', 'all_th30.js'].map((f) => path.join(DATA_DIR, f));
+  const gz = (p) => (exists(p) ? zlib.gzipSync(fs.readFileSync(p), { level: 6 }).length : 0);
+  const startupGz = gz(hp) + startupFiles.reduce((s, p) => s + gz(p), 0);
+  const startupRaw = bytes + startupFiles.reduce((s, p) => s + (exists(p) ? fs.statSync(p).size : 0), 0);
+  check(startupGz > 0 && startupGz <= 512000, 'H. startup payload (screen.html + meta.js + all.js + all_th30.js) gzip-6 ' + startupGz + ' bytes <= 512000 (raw ' + startupRaw + ' bytes)');
 }
 
 // ---------------------------------------------------------------- E. wording
 {
-  const files = [['report.md', path.join(PUB, 'report.md')], ['screen.html', path.join(ROOT, 'screen.html')], ['screen/README.md', path.join(PUB, 'README.md')]];
+  const files = [['report.md', path.join(PUB, 'report.md')], ['screen.html', path.join(ROOT, 'screen.html')], ['screen/README.md', path.join(PUB, 'README.md')], ['screen/data/meta.js', path.join(PUB, 'data', 'meta.js')]];
   for (const [name, p] of files) {
     if (!exists(p)) { check(false, 'E. ' + name + ' missing'); continue; }
     const txt = fs.readFileSync(p, 'utf8');

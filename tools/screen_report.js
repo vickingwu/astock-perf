@@ -2,7 +2,9 @@
 /* 读取 screen/out/results.json + screen/out/benchmarks.json + screen/run_meta.json，生成：
  *   screen/report.md —— 中文报告 v3：版本变更说明 / 概览 / 板块构成 / 各阈值综合榜 Top50 + 稳健·进攻·穿越榜 Top20 + 牛熊轮数分布 /
  *                       近10年·近5年同窗口榜 / Pareto 前沿 / 跨阈值交集 / 合理性校验（含结构观察）/ 口径与局限
- *   screen.html（仓库根目录）—— 零依赖单文件：区间切换（上市至今 / 近10年 / 近5年）、阈值切换、板块多选、列头排序、文本筛选、CAGR×MaxDD 散点、每行链接看板
+ *   screen.html（仓库根目录）—— 零依赖页面壳（< 60 KB）：区间切换（上市至今 / 近10年 / 近5年）、阈值切换、板块多选、列头排序、文本筛选、CAGR×MaxDD 散点、每行链接看板；
+ *                       数据在 screen/data/*.js（13 个纯 JS 赋值文件，<script> 动态注入加载，file:// 可用）：meta.js（META / KEYS / 行业字典）、all.js / 10y.js / 5y.js（各区间基础字段，
+ *                       按入选个股下标对齐，不在窗口的为 null）、<区间>_th30|40|50.js（各阈值 18 项指标）；首屏只加载 meta.js + all.js + all_th30.js，其余切换时按需加载
  *   版本号取 run_meta.version（tools/screen_all.js CONFIG.VERSION）；v3 = 股票池扩为 沪深主板 + 创业板 + 科创板，指标口径与 v2.1 相同
  * 用法（仓库根目录）：node tools/screen_report.js [--source eastmoney|tencent]
  */
@@ -14,6 +16,7 @@ const ROOT = path.join(__dirname, '..');
 const OUT = path.join(ROOT, 'screen', 'out');   // results.json / benchmarks.json（工作文件，不入库）
 const PUB = path.join(ROOT, 'screen');          // run_meta.json（输入）/ report.md（输出）
 const HTML_OUT = path.join(ROOT, 'screen.html');
+const DATA_DIR = path.join(ROOT, 'screen', 'data'); // screen.html 按需加载的数据文件（入库）
 const TEMPLATE = path.join(__dirname, 'screen_template.html');
 const DASH_MD = '../index.html';   // report.md 位于 screen/，看板在仓库根目录
 const DASH_HTML = './index.html';  // screen.html 位于仓库根目录，与 index.html 同级（模板占位符 __DASH_BASE__）
@@ -461,39 +464,55 @@ L.push('- 重算与校验：`node tools/screen_all.js --compute-only [--data-end
 L.push('');
 fs.writeFileSync(path.join(PUB, 'report.md'), L.join('\n'), 'utf8');
 
-// ------------------------------------------------------------------ screen.html（紧凑数组打包：三份数据集 < 8 MB）
-const BASE_KEYS = ['code', 'name', 'secid', 'board', 'industry', 'listDate', 'years', 'total', 'cagr', 'maxDD', 'ddPeak', 'ddTrough', 'ddDownDays', 'ddRecDays', 'ddRecovered', 'ddSinceTroughDays', 'curDD', 'calmar', 'vol', 'roll5yP10', 'roll5yMedian', 'roll5yWin', 'excessSz', 'pareto', 'winStart'];
-const WIN_BASE_KEYS = BASE_KEYS.slice(6); // code/name/secid/board/industry/listDate 六个身份字段来自全史行（按下标对齐；模板 VIEWS 构造时复制）
+// ------------------------------------------------------------------ screen.html 壳 + screen/data/*.js（紧凑数组打包：按区间 × 阈值拆文件，首屏 meta + all + all_th30）
+const BASE_KEYS = ['code', 'name', 'secid', 'board', 'industry', 'listDate', 'years', 'total', 'cagr', 'maxDD', 'ddPeak', 'ddTrough', 'ddDownDays', 'ddRecDays', 'ddRecovered', 'ddSinceTroughDays', 'curDD', 'calmar', 'roll5yP10', 'excessSz', 'pareto', 'winStart']; // 页面只读这 22 项（vol / roll5yMedian / roll5yWin 不再输出）
+const WIN_BASE_KEYS = BASE_KEYS.slice(6); // code/name/secid/board/industry/listDate 六个身份字段来自全史行（按下标对齐；模板 materialize 时复制）
 const TH_KEYS = ['nBull', 'nBear', 'nCB', 'nBQ', 'bearSrc', 'avgBearRet', 'avgBullRet', 'deepestBearRet', 'bullNewHighRate', 'bearHigherLowRate', 'bullTimeShare', 'curBull', 'curRet', 'composite', 'rank', 'steadyRank', 'attackRank', 'crossRank'];
 const r4 = (x) => (x == null || !isFinite(x) ? null : Math.round(x * 1e4) / 1e4);
+// 行业字典：行内存下标，META.industries 存字符串（KEYS.dict 记录需解码的字段）
+const INDUSTRIES = [...new Set(elig.map((r) => r.industry || ''))].sort();
+const INDUSTRY_IDX = new Map(INDUSTRIES.map((s, i) => [s, i]));
 function baseValue(v, baseRow, k) {
   switch (k) {
-    case 'code': return baseRow.code; case 'name': return baseRow.name; case 'secid': return baseRow.secid; case 'board': return bd(baseRow); case 'industry': return baseRow.industry || ''; case 'listDate': return baseRow.listDate;
+    case 'code': return baseRow.code; case 'name': return baseRow.name; case 'secid': return baseRow.secid; case 'board': return bd(baseRow); case 'industry': return INDUSTRY_IDX.get(baseRow.industry || ''); case 'listDate': return baseRow.listDate;
     case 'years': return v.years == null ? null : Math.round(v.years * 100) / 100;
-    case 'roll5yP10': return v.roll5y ? r4(v.roll5y.p10) : null; case 'roll5yMedian': return v.roll5y ? r4(v.roll5y.median) : null; case 'roll5yWin': return v.roll5y ? r4(v.roll5y.winRate) : null;
+    case 'roll5yP10': return v.roll5y ? r4(v.roll5y.p10) : null;
     case 'excessSz': return r4(v.bench.excessCagr); case 'pareto': return !!v.pareto; case 'winStart': return v.window ? v.window.start : null;
     case 'ddPeak': case 'ddTrough': return v[k]; case 'ddDownDays': case 'ddRecDays': case 'ddSinceTroughDays': return v[k]; case 'ddRecovered': return !!v.ddRecovered;
     default: return r4(v[k]);
   }
 }
-function packView(v, baseRow, keys) {
-  const out = keys.map((k) => baseValue(v, baseRow, k));
-  for (const T of THRESHOLDS) {
-    const t = v.th[T];
-    out.push([t.nBull, t.nBear, t.nCompletedBear, t.nBearQualifying, t.avgBearSrc === 'maxDD' ? 1 : 0, r4(t.avgBearRet), r4(t.avgBullRet), r4(t.deepestBearRet), r4(t.bullNewHighRate), r4(t.bearHigherLowRate), r4(t.bullTimeShare), t.curPhase.bull, r4(t.curPhase.ret), r4(t.composite), t.rank, t.steadyRank, t.attackRank, t.crossRank]);
-  }
-  return out;
+const packBase = (v, baseRow, keys) => keys.map((k) => baseValue(v, baseRow, k));
+const packTh = (t) => [t.nBull, t.nBear, t.nCompletedBear, t.nBearQualifying, t.avgBearSrc === 'maxDD' ? 1 : 0, r4(t.avgBearRet), r4(t.avgBullRet), r4(t.deepestBearRet), r4(t.bullNewHighRate), r4(t.bearHigherLowRate), r4(t.bullTimeShare), t.curPhase.bull, r4(t.curPhase.ret), r4(t.composite), t.rank, t.steadyRank, t.attackRank, t.crossRank];
+const viewOf = (r, w) => (w === 'all' ? r : r.windows && r.windows[w] ? r.windows[w] : null);
+const VIEW_KEYS = ['all'].concat(WINDOWS.map((W) => W.key));
+const BASE = {}, TH = {}; // BASE[w] = [行|null…]（与 elig 下标对齐）；TH[w][T] = [18 项数组|null…]（同对齐）
+for (const w of VIEW_KEYS) {
+  BASE[w] = elig.map((r) => { const v = viewOf(r, w); return v ? packBase(v, r, w === 'all' ? BASE_KEYS : WIN_BASE_KEYS) : null; });
+  TH[w] = {}; for (const T of THRESHOLDS) TH[w][T] = elig.map((r) => { const v = viewOf(r, w); return v ? packTh(v.th[T]) : null; });
 }
-const DATA_P = elig.map((r) => packView(r, r, BASE_KEYS));
-const WIN_P = {}; for (const W of WINDOWS) WIN_P[W.key] = elig.map((r) => (r.windows && r.windows[W.key] ? packView(r.windows[W.key], r, WIN_BASE_KEYS) : null));
-const KEYS = { base: BASE_KEYS, winBase: WIN_BASE_KEYS, th: TH_KEYS, thresholds: THRESHOLDS, boards: BOARD_ORDER, windows: [{ key: 'all', label: '上市至今', range: 'all', start: null }].concat(WINDOWS.map((W) => ({ key: W.key, label: W.label, range: W.key, start: W.start }))) };
+const KEYS = { base: BASE_KEYS, winBase: WIN_BASE_KEYS, th: TH_KEYS, thresholds: THRESHOLDS, boards: BOARD_ORDER, windows: [{ key: 'all', label: '上市至今', range: 'all', start: null }].concat(WINDOWS.map((W) => ({ key: W.key, label: W.label, range: W.key, start: W.start }))), dict: { industry: 'industries' } };
 const benchPack = (f) => benchmarks.map((b) => { const v = f(b); return v ? { name: b.name, cagr: v.cagr, maxDD: v.maxDD } : { name: b.name, cagr: null, maxDD: null }; });
 const htmlBench = { all: benchPack((b) => b) }; for (const W of WINDOWS) htmlBench[W.key] = benchPack((b) => b.windows && b.windows[W.key]);
 const windowEligible = {}; for (const W of WINDOWS) windowEligible[W.key] = wElig(W).length;
 const boards = {}; for (const b of BOARD_ORDER) { boards[b] = { universe: boardCount(results, b), eligible: boardCount(elig, b) }; for (const W of WINDOWS) boards[b]['w' + W.key] = boardCount(wElig(W), b); }
-const htmlMeta = { version: VER.replace(/^v/i, ''), source: SOURCE, sourceLabel: SOURCE_LABEL, sourceNote: SOURCE_NOTE, universeNote: INTERIM_NOTE_HTML, dataEndDate: DATA_END, dataEndSpec: DATA_END_SPEC, dataEndMode: DATA_END_MODE, universe: results.length, eligible: elig.length, windowEligible, boards, universeFetchedAt: uf && uf.fetchedAt ? uf.fetchedAt.slice(0, 10) : null, generated: new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC', thresholds: THRESHOLDS, benchmarks: htmlBench };
+const htmlMeta = { version: VER.replace(/^v/i, ''), source: SOURCE, sourceLabel: SOURCE_LABEL, sourceNote: SOURCE_NOTE, universeNote: INTERIM_NOTE_HTML, dataEndDate: DATA_END, dataEndSpec: DATA_END_SPEC, dataEndMode: DATA_END_MODE, universe: results.length, eligible: elig.length, windowEligible, boards, universeFetchedAt: uf && uf.fetchedAt ? uf.fetchedAt.slice(0, 10) : null, generated: new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC', thresholds: THRESHOLDS, benchmarks: htmlBench, industries: INDUSTRIES };
 const safeJSON = (o) => JSON.stringify(o).replace(/</g, '\\u003c').replace(/-->/g, '--\\u003e');
-const html = fs.readFileSync(TEMPLATE, 'utf8').split('__META__').join(safeJSON(htmlMeta)).split('__KEYS__').join(safeJSON(KEYS)).split('__DATA__').join(safeJSON(DATA_P)).split('__WIN__').join(safeJSON(WIN_P)).split('__DASH_BASE__').join(DASH_HTML);
-if (Buffer.byteLength(html) >= 8 * 1024 * 1024) throw new Error('screen.html too large: ' + Buffer.byteLength(html) + ' bytes');
+// 数据文件：纯 JS 赋值（<script> 注入即可读，file:// 下无需 fetch）；先清掉目录里的旧 *.js，避免残留过期文件
+fs.mkdirSync(DATA_DIR, { recursive: true });
+for (const f of fs.readdirSync(DATA_DIR)) if (f.endsWith('.js')) fs.unlinkSync(path.join(DATA_DIR, f));
+const sizes = {};
+const writeData = (name, body) => { const s = body + '\n'; fs.writeFileSync(path.join(DATA_DIR, name), s, 'utf8'); sizes[name] = Buffer.byteLength(s); };
+const dataFile = (key, arr) => 'window.__SCREEN_DATA=window.__SCREEN_DATA||{};window.__SCREEN_DATA["' + key + '"]=' + safeJSON(arr) + ';';
+const thName = (w, T) => w + '_th' + Math.round(+T * 100);
+writeData('meta.js', 'window.__SCREEN_META=' + safeJSON({ META: htmlMeta, KEYS }) + ';');
+for (const w of VIEW_KEYS) {
+  writeData(w + '.js', dataFile(w, BASE[w]));
+  for (const T of THRESHOLDS) writeData(thName(w, T) + '.js', dataFile(thName(w, T), TH[w][T]));
+}
+const startupBytes = sizes['meta.js'] + sizes['all.js'] + sizes['all_th30.js'];
+const html = fs.readFileSync(TEMPLATE, 'utf8').split('__DASH_BASE__').join(DASH_HTML).split('__DATA_KB__').join(String(Math.round(startupBytes / 1024)));
+if (/__META__|__KEYS__|__DATA__|__WIN__/.test(html)) throw new Error('screen_template.html still contains an inline data placeholder (__META__ / __KEYS__ / __DATA__ / __WIN__)');
+if (Buffer.byteLength(html) >= 60 * 1024) throw new Error('screen.html shell too large: ' + Buffer.byteLength(html) + ' bytes (limit 61440)');
 fs.writeFileSync(HTML_OUT, html, 'utf8');
-process.stdout.write('report.md lines=' + L.length + ' eligible=' + elig.length + ' boards=' + JSON.stringify(boards) + ' windows=' + JSON.stringify(windowEligible) + ' pareto=' + pareto.length + ' inAll3=' + inAll.length + ' html bytes=' + Buffer.byteLength(html) + ' -> ' + HTML_OUT + '\n');
+process.stdout.write('report.md lines=' + L.length + ' eligible=' + elig.length + ' boards=' + JSON.stringify(boards) + ' windows=' + JSON.stringify(windowEligible) + ' pareto=' + pareto.length + ' inAll3=' + inAll.length + ' shell bytes=' + Buffer.byteLength(html) + ' data files=' + JSON.stringify(sizes) + ' startup(meta+all+all_th30)=' + startupBytes + ' bytes -> ' + HTML_OUT + ' + ' + DATA_DIR + '\n');

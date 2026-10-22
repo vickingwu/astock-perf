@@ -47,6 +47,7 @@
   .banner b { font-weight: 700; }
   .srcTag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #dbeafe; color: #1e40af; margin-left: 6px; }
   .srcTag.warn { background: #fde68a; color: #78350f; }
+  .status { margin: 0 20px 10px; color: var(--axis); font-size: 12px; } .status.err { color: #b91c1c; } .status:empty { display: none; }
 </style>
 </head>
 <body>
@@ -68,6 +69,7 @@
   <label class="chk"><input type="checkbox" id="logX"> 散点 x 轴 log(1+年化)</label>
   <span class="sub" id="countLine"></span>
 </div>
+<div id="status" class="status" role="status" aria-live="polite">正在加载数据（约 __DATA_KB__ KB）…</div>
 <section class="card">
   <h3>年化 CAGR × 最大回撤 散点 <span class="muted" id="scatterNote">（已选板块的入选个股；红点 = 当前阈值综合榜 Top 50；悬停看名称，点击打开看板）</span></h3>
   <div class="scatter-wrap"><div id="scatter"></div><div class="tip" id="tip"></div></div>
@@ -82,23 +84,55 @@
 (function () {
   'use strict';
   const DASH_BASE = '__DASH_BASE__'; // 看板 index.html 相对本文件的路径（本文件在仓库根目录，与 index.html 同级）
-  const META = __META__;
-  const KEYS = __KEYS__;
-  const DATA_P = __DATA__;   // 上市至今：每行 [base 字段…, th30[], th40[], th50[]]（紧凑数组，见 KEYS）
-  const WIN_P = __WIN__;     // { '10y': [行|null…], '5y': [...] }，与 DATA_P 下标对齐
-  const BOARDS = KEYS.boards || ['主板', '创业板', '科创板'];
-  function inflate(arr, keys) {
+  // ---------------- 数据加载：screen/data/*.js 为纯 JS 赋值文件（window.__SCREEN_META / window.__SCREEN_DATA[key]），用 <script> 动态注入加载（file:// 下可用，不走 fetch）
+  // 首屏只加载 meta.js + all.js + all_th30.js；切换区间 / 阈值时再按需加载 <区间>.js / <区间>_th<阈值>.js
+  const DATA_BASE = 'screen/data/'; // 相对 screen.html（仓库根目录）
+  const loading = {}; // file -> Promise（已加载 / 加载中缓存；失败时删除以便重试）
+  function loadScript(file) {
+    if (loading[file]) return loading[file];
+    loading[file] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = DATA_BASE + file;
+      s.onload = () => resolve(file);
+      s.onerror = () => { delete loading[file]; s.remove(); reject(new Error(file)); };
+      document.body.appendChild(s);
+    });
+    return loading[file];
+  }
+  const thFile = (win, T) => win + '_th' + Math.round(+T * 100) + '.js';
+  const dataKey = (file) => file.replace(/\.js$/, '');
+  let META, KEYS, BOARDS = ['主板', '创业板', '科创板'], DATA = []; // boot() 后赋值（BOARDS 取 KEYS.boards）；DATA = VIEWS.all（上市至今行，jumpTarget 用）
+  const VIEWS = {};  // win -> 已物化的行数组（去掉 null）
+  const BY_IDX = {}; // win -> 与入选个股下标对齐的行数组（含 null），合并阈值数据时按下标定位
+  const HAVE = {};   // win -> { T: true }：该区间 × 阈值的 18 项指标已合并进行对象
+  function inflateBase(arr, keys) {
     const o = {}; for (let i = 0; i < keys.length; i++) o[keys[i]] = arr[i];
+    for (const k in KEYS.dict) if (k in o) o[k] = META[KEYS.dict[k]][o[k]]; // 字典字段解码（行业：下标 -> 字符串）
     o.th = {};
-    KEYS.thresholds.forEach((T, j) => { const a = arr[keys.length + j] || []; const t = {}; KEYS.th.forEach((k, i) => { t[k] = a[i]; }); o.th[T] = t; });
     return o;
   }
-  const DATA = DATA_P.map((a) => inflate(a, KEYS.base));
-  const VIEWS = { all: DATA };
+  function inflateTh(a) { const t = {}; KEYS.th.forEach((k, i) => { t[k] = a[i]; }); return t; }
   // 窗口行只带窗口指标；code / name / secid / board / industry / listDate 六个身份字段从全史行复制（与 KEYS.winBase = base.slice(6) 对应）
-  for (const w of Object.keys(WIN_P)) VIEWS[w] = DATA.map((r, i) => (WIN_P[w][i] ? Object.assign({ code: r.code, name: r.name, secid: r.secid, board: r.board, industry: r.industry, listDate: r.listDate }, inflate(WIN_P[w][i], KEYS.winBase)) : null)).filter(Boolean);
+  function materialize(win) {
+    if (BY_IDX[win]) return;
+    const src = window.__SCREEN_DATA[win];
+    if (win === 'all') BY_IDX.all = src.map((a) => inflateBase(a, KEYS.base));
+    else BY_IDX[win] = src.map((a, i) => { if (!a) return null; const r = BY_IDX.all[i]; return Object.assign({ code: r.code, name: r.name, secid: r.secid, board: r.board, industry: r.industry, listDate: r.listDate }, inflateBase(a, KEYS.winBase)); });
+    VIEWS[win] = BY_IDX[win].filter(Boolean);
+    HAVE[win] = HAVE[win] || {};
+  }
+  function mergeTh(win, T) {
+    if (HAVE[win][T]) return;
+    const src = window.__SCREEN_DATA[dataKey(thFile(win, T))];
+    BY_IDX[win].forEach((r, i) => { if (r) r.th[T] = inflateTh(src[i]); });
+    HAVE[win][T] = true;
+  }
+  const isReady = (win, T) => !!(VIEWS[win] && HAVE[win] && HAVE[win][T]);
+  const ensure = (win, T) => Promise.all([VIEWS[win] ? null : loadScript(win + '.js'), isReady(win, T) ? null : loadScript(thFile(win, T))].filter(Boolean)).then(() => { materialize(win); mergeTh(win, T); });
   const winLabel = (k) => ((KEYS.windows.find((x) => x.key === k) || {}).label || k);
   const $ = (id) => document.getElementById(id);
+  const setStatus = (text, isErr) => { const s = $('status'); s.textContent = text; s.className = 'status' + (isErr ? ' err' : ''); };
+  const clearStatus = () => setStatus('', false);
   const P = (x, d = 1) => { if (x == null || !isFinite(x)) return '—'; let v = (x * 100).toFixed(d); if (parseFloat(v) === 0) v = (0).toFixed(d); return (parseFloat(v) > 0 ? '+' : '') + v + '%'; };
   const PN = (x, d = 0) => (x == null || !isFinite(x) ? '—' : (x * 100).toFixed(d) + '%');
   const M = (days) => (days == null ? '—' : days < 31 ? Math.round(days) + 'd' : Math.round(days / 30.4375) + 'm');
@@ -229,12 +263,30 @@
   }
 
   // ---------------- wiring
-  $('winSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; $('winSeg').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); state.win = b.dataset.win; if (state.win === 'all' && state.sortKey === 'winStart') { state.sortKey = 'rank'; state.sortDir = 1; } renderTable(); renderScatter(); });
-  $('thSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; $('thSeg').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); state.th = b.dataset.th; renderTable(); renderScatter(); });
-  $('boardSeg').addEventListener('change', (e) => { const cb = e.target.closest('input[data-board]'); if (!cb) return; if (cb.checked) state.boards.add(cb.dataset.board); else state.boards.delete(cb.dataset.board); renderTable(); renderScatter(); });
-  $('tbl').querySelector('thead').addEventListener('click', (e) => { const th = e.target.closest('th'); if (!th) return; const key = th.dataset.key; if (state.sortKey === key) state.sortDir = -state.sortDir; else { state.sortKey = key; const c = COLS.find((x) => x.key === key); state.sortDir = (c && (c.str || /rank|Rank|code|listDate|ddDownDays|ddRec/.test(key))) ? 1 : -1; } renderTable(); });
+  // 区间 / 阈值切换：按钮高亮立即生效；所需数据文件未加载时先显示「加载中…」并按需加载，加载完再切 state 并渲染；pendingTok 丢弃被更快的再次切换覆盖的过期加载
+  let pendingTok = 0;
+  function applyView(nextWin, nextTh) { state.win = nextWin; state.th = nextTh; if (state.win === 'all' && state.sortKey === 'winStart') { state.sortKey = 'rank'; state.sortDir = 1; } renderTable(); renderScatter(); }
+  function switchView(nextWin, nextTh) {
+    $('winSeg').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.win === nextWin));
+    $('thSeg').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x.dataset.th === nextTh));
+    if (isReady(nextWin, nextTh)) { pendingTok++; clearStatus(); applyView(nextWin, nextTh); return; }
+    const tok = ++pendingTok;
+    setStatus('加载中…（' + winLabel(nextWin) + ' · ' + Math.round(+nextTh * 100) + '%）', false);
+    ensure(nextWin, nextTh).then(() => { if (tok !== pendingTok) return; clearStatus(); applyView(nextWin, nextTh); }).catch((e) => { if (tok === pendingTok) setStatus('数据加载失败：' + e.message + '（请确认 screen/data/ 目录完整，或刷新重试）', true); });
+  }
   let ft = null;
-  $('filter').addEventListener('input', (e) => { clearTimeout(ft); ft = setTimeout(() => { state.filter = e.target.value; renderTable(); }, 120); });
+  function wire() {
+    $('winSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; switchView(b.dataset.win, state.th); });
+    $('thSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; switchView(state.win, b.dataset.th); });
+    $('boardSeg').addEventListener('change', (e) => { const cb = e.target.closest('input[data-board]'); if (!cb) return; if (cb.checked) state.boards.add(cb.dataset.board); else state.boards.delete(cb.dataset.board); renderTable(); renderScatter(); });
+    $('tbl').querySelector('thead').addEventListener('click', (e) => { const th = e.target.closest('th'); if (!th) return; const key = th.dataset.key; if (state.sortKey === key) state.sortDir = -state.sortDir; else { state.sortKey = key; const c = COLS.find((x) => x.key === key); state.sortDir = (c && (c.str || /rank|Rank|code|listDate|ddDownDays|ddRec/.test(key))) ? 1 : -1; } renderTable(); });
+    $('filter').addEventListener('input', (e) => { clearTimeout(ft); ft = setTimeout(() => { state.filter = e.target.value; renderTable(); }, 120); });
+    $('filter').addEventListener('keydown', (e) => { if (e.key !== 'Enter') return; if (e.isComposing || e.keyCode === 229) return; clearTimeout(ft); state.filter = e.target.value; renderTable(); const url = jumpTarget(e.target.value); if (url) location.href = url; });
+    $('onlyTop').addEventListener('change', (e) => { state.onlyTop = e.target.checked; renderTable(); });
+    $('onlyPareto').addEventListener('change', (e) => { state.onlyPareto = e.target.checked; renderTable(); });
+    $('logX').addEventListener('change', (e) => { state.logX = e.target.checked; renderScatter(); });
+    let rt = null; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderScatter, 160); });
+  }
   // 筛选框兼作跳转框：回车时，6 位代码（可带 sh/sz 前缀）直接打开个股看板——市场优先取表内 secid，表外代码（ETF / LOF / 北交所 / 新股）按前缀或与 app.js inferMarket 相同的规则推断；
   // 非代码文本且筛选结果恰好 1 行时打开该行；其余情况只筛选不跳转
   function jumpTarget(text) {
@@ -249,21 +301,29 @@
     const list = visibleRows();
     return list.length === 1 ? dash(list[0], state.th) : null;
   }
-  $('filter').addEventListener('keydown', (e) => { if (e.key !== 'Enter') return; if (e.isComposing || e.keyCode === 229) return; clearTimeout(ft); state.filter = e.target.value; renderTable(); const url = jumpTarget(e.target.value); if (url) location.href = url; });
-  $('onlyTop').addEventListener('change', (e) => { state.onlyTop = e.target.checked; renderTable(); });
-  $('onlyPareto').addEventListener('change', (e) => { state.onlyPareto = e.target.checked; renderTable(); });
-  $('logX').addEventListener('change', (e) => { state.logX = e.target.checked; renderScatter(); });
-  let rt = null; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderScatter, 160); });
-  const mb = META.boards || {};
-  const boardMeta = BOARDS.map((b) => b + ' ' + ((mb[b] || {}).eligible != null ? mb[b].eligible : '—')).join(' / ');
-  $('metaLine').textContent = 'v' + (META.version || 3) + ' · 数据截止 ' + META.dataEndDate + (META.dataEndSpec && META.dataEndSpec !== 'auto' ? '（--data-end 固定）' : '') + ' · 股票池 ' + META.universe + ' 只 · 入选 ' + META.eligible + ' 只（' + boardMeta + '；近10年窗口 ' + ((META.windowEligible || {})['10y'] || 0) + ' / 近5年窗口 ' + ((META.windowEligible || {})['5y'] || 0) + '）· 数据源 ' + META.sourceLabel + ' · 生成于 ' + META.generated;
-  const isTx = META.source === 'tencent';
-  $('srcTag').textContent = isTx ? '数据源：腾讯 hfq（回退）' : '数据源：东财 fqt=2（看板口径）';
-  $('srcTag').className = 'srcTag' + (isTx ? ' warn' : '');
-  $('banner').className = 'banner' + (isTx ? ' warn' : '');
-  $('banner').innerHTML = '<b>' + esc(isTx ? '⚠️ 数据源与口径说明' : '口径说明') + '</b>：' + esc(META.sourceNote) + ' 股票池为沪深主板 + 创业板 + 科创板（除 ST / 退、除北交所、上市满 5 年），排名与百分位在全部板块的入选个股内统一计算；「板块」勾选只筛选显示的行。' + (META.universeNote ? '<br><b>股票池数据缺口</b>：' + esc(META.universeNote.replace(/`[^`]*`/g, (s) => s.slice(1, -1))) : '');
-  renderTable(); renderScatter();
-  window.__SCREEN__ = { state, DATA, VIEWS, COLS, META, KEYS, boardRows, visibleRows, jumpTarget }; // 便于自动化核对
+
+  // ---------------- boot：首屏三个数据文件就位后解码、渲染
+  function boot() {
+    META = window.__SCREEN_META.META; KEYS = window.__SCREEN_META.KEYS;
+    BOARDS = KEYS.boards || BOARDS; state.boards = new Set(BOARDS);
+    const rows0 = window.__SCREEN_DATA.all;
+    if (!rows0 || !rows0.length || rows0[0].length !== KEYS.base.length) { setStatus('数据文件与页面版本不一致，请刷新（Ctrl+F5）', true); return; } // 数据文件与壳的字段数不一致（缓存了旧文件）
+    materialize('all'); mergeTh('all', '0.3'); DATA = VIEWS.all;
+    const mb = META.boards || {};
+    const boardMeta = BOARDS.map((b) => b + ' ' + ((mb[b] || {}).eligible != null ? mb[b].eligible : '—')).join(' / ');
+    $('metaLine').textContent = 'v' + (META.version || 3) + ' · 数据截止 ' + META.dataEndDate + (META.dataEndSpec && META.dataEndSpec !== 'auto' ? '（--data-end 固定）' : '') + ' · 股票池 ' + META.universe + ' 只 · 入选 ' + META.eligible + ' 只（' + boardMeta + '；近10年窗口 ' + ((META.windowEligible || {})['10y'] || 0) + ' / 近5年窗口 ' + ((META.windowEligible || {})['5y'] || 0) + '）· 数据源 ' + META.sourceLabel + ' · 生成于 ' + META.generated;
+    const isTx = META.source === 'tencent';
+    $('srcTag').textContent = isTx ? '数据源：腾讯 hfq（回退）' : '数据源：东财 fqt=2（看板口径）';
+    $('srcTag').className = 'srcTag' + (isTx ? ' warn' : '');
+    $('banner').className = 'banner' + (isTx ? ' warn' : '');
+    $('banner').innerHTML = '<b>' + esc(isTx ? '⚠️ 数据源与口径说明' : '口径说明') + '</b>：' + esc(META.sourceNote) + ' 股票池为沪深主板 + 创业板 + 科创板（除 ST / 退、除北交所、上市满 5 年），排名与百分位在全部板块的入选个股内统一计算；「板块」勾选只筛选显示的行。' + (META.universeNote ? '<br><b>股票池数据缺口</b>：' + esc(META.universeNote.replace(/`[^`]*`/g, (s) => s.slice(1, -1))) : '');
+    wire();
+    renderTable(); renderScatter(); clearStatus();
+    window.__SCREEN__ = { state, DATA, VIEWS, COLS, META, KEYS, boardRows, visibleRows, jumpTarget, ensure, loadScript, isReady, ready: true }; // 便于自动化核对
+  }
+  Promise.all([loadScript('meta.js'), loadScript('all.js'), loadScript(thFile('all', '0.3'))])
+    .then(() => requestAnimationFrame(boot))
+    .catch((e) => setStatus('数据加载失败：' + e.message + '（请确认 screen/data/ 目录完整，或刷新重试）', true));
 })();
 </script>
 </body>
