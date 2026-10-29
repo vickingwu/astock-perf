@@ -12,6 +12,8 @@
  *   node tools/screen_all.js --universe-only      只处理股票池（拉取 / 为临时行补 上市日·行业·市值 / 预剔除）并写 screen/universe.json，不拉 K 线不计算
  *   node tools/screen_all.js --source tencent --fetch-only     回退数据源：腾讯 web.ifzq.gtimg.cn 后复权日线（东财限流期间）
  *   node tools/screen_all.js --source tencent --compute-only   用腾讯缓存（screen/out/klines_tx）计算
+ *   node tools/screen_all.js --compute-only --data-end 2026-10-15 --today 2026-10-21   固定「今天」（f26 预剔除 上市<5年 的判定日），复算时复现早先一次运行的股票池剔除
+ *   node tools/screen_all.js --compute-only --no-dividends    关闭 v3.1 分红指标：不读分红 / 不复权缓存、无红利榜、CSV 不加新列，产出与 v3 逐字节一致
  *
  * 引擎：../app.js（只 require，不修改）。数据：东方财富 clist（股票池，分段 CONFIG.UNIVERSE_SEGMENTS）+ push2his 日线（后复权 fqt=2，与看板同口径）；
  *       --source tencent 时日线改用腾讯 fqkline（hfq，每页 640 根向前分页、重叠拼接），口径与看板略有差异。
@@ -34,6 +36,16 @@
  *   2. --data-end YYYY-MM-DD|auto：统一数据终点改为命令行指定；auto = 缓存上证末根日期（上海时间当日 15:05 前取前一根）。--fetch-only 不解析。
  *   3. fetch_done_<source>.json 只在全量队列（非 --codes / --sample）无限流类失败时写入。指标口径与 v2.1 完全一致。
  *   4. 代码移入 astock-perf/tools/，产出发布到 screen/ 与根目录 screen.html；工作文件在 screen/out/（.gitignore）。
+ * v3.1（2026-10-29）：分红 / 股息率指标（CONFIG.DIV；现有指标、综合分、名次与 v3 逐位相同）
+ *   1. 新缓存（tools/fetch_dividends.js 拉取）：screen/out/dividends/<secid>.json（东财 datacenter RPT_SHAREBONUS_DET 原始行）、
+ *      screen/out/raw_monthly/<secid>.json（腾讯不复权月收盘 + 数据截止日附近日收盘）。只读数值列（PRETAX_BONUS_RMB / BONUS_RATIO / IT_RATIO / BONUS_IT_RATIO / BASIC_EPS），不解析文字列。
+ *   2. 事件 = 「实施」且除息日 ≤ DATA_END 的行：每股税前现金 = PRETAX_BONUS_RMB/10，送转因子 = 1 + (BONUS_IT_RATIO ?? BONUS_RATIO+IT_RATIO)/10，会计年度 = REPORT_DATE 年份（无则按除息月：≤8 月归上一年）。
+ *   3. 与后复权序列对账（reconcileDiv）：hfq(t) = S(t)·raw(t) + D(t)（现金加性、送转乘性，锚定上市首日），按月末点算区间残差；干净台阶 = 表缺一笔现金 → 补齐事件（src 'hfq'，如 600519 2023-12-20 特别分红 10派191.06）；
+ *      近 12 个区间 ≥3 个无法解释 → recon_drift（送转 / 配股不符）：再投资类指标置空，且不采用补齐事件（避免把 S 失配的噪声当成分红）。
+ *   4. 指标（每个视图 all / 10y / 5y 各一套，键集相同）：每股分红TTM、股息率(近12月)、连续分红年数（自 LAST_FY = year(DATA_END)−1 倒数）、分红年数 x/N、平均股息率（现金 ÷ 除息前一月末不复权收盘）、
+ *      派息率（Σ现金 ÷ Σ年报 EPS，全局开关 hasPayout）、分红增长（拆分调整年度 DPS 的 CAGR）、年化(分红再投资)（月末不复权价 + 除息后首个月末按收盘再投资）、纯价格年化、分红贡献 = 二者之差、年化(后复权,同起点)、标记（hfq_gap / recon_drift / px_missing / trend_month）。
+ *   5. 排名：COMPOSITE_WEIGHTS 新增 divYieldTTM / divStreak 权重 0（综合分不变；compositeN 只数正权重项）；新增红利榜 dividend = 股息率TTM + 连续分红 + 最大回撤 百分位均值，门槛 BOARD_GATE：分红数据 ok 且连续分红 ≥ STREAK_MIN_FOR_BOARD。
+ *   6. CSV：新列一律追加在「数据源」之后；run_meta.json 新增 today / dividends；--today / --no-dividends 见用法。
  */
 'use strict';
 const https = require('https');
@@ -73,12 +85,27 @@ const CONFIG = {
     MAX_CONSEC_PER_REQ: 12,             // 同一请求连续失败 12 次（累计约 1.6 小时）才放弃该只、记入失败并继续；进程不退出
     HEADERS: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://gu.qq.com/' },
   },
-  COMPOSITE_WEIGHTS: { cagr: 1, calmar: 1, maxDD: 1, avgBearRet: 1, bullNewHighRate: 1, roll5yP10: 1 }, // 综合分权重（等权）
-  BOARDS: { steady: ['avgBearRet', 'maxDD'], attack: ['cagr', 'avgBullRet'], cross: ['bullNewHighRate', 'bearHigherLowRate'] },
-  BOARD_REQUIRE_ALL: { cross: true },   // 穿越榜要求两项都非空
+  COMPOSITE_WEIGHTS: { cagr: 1, calmar: 1, maxDD: 1, avgBearRet: 1, bullNewHighRate: 1, roll5yP10: 1, divYieldTTM: 0, divStreak: 0 }, // 综合分权重（等权；v3.1 两项分红权重 0 = 不计分，可调）
+  BOARDS: { steady: ['avgBearRet', 'maxDD'], attack: ['cagr', 'avgBullRet'], cross: ['bullNewHighRate', 'bearHigherLowRate'], dividend: ['divYieldTTM', 'divStreak', 'maxDD'] },
+  BOARD_REQUIRE_ALL: { cross: true, dividend: true },   // 穿越榜要求两项都非空；红利榜要求三项都非空
+  BOARD_GATE: { dividend: (v) => !!(v.div && v.div.data === 'ok' && v.div.divStreak != null && v.div.divStreak >= CONFIG.DIV.STREAK_MIN_FOR_BOARD) }, // 分榜入围门槛（v = 视图记录）：不满足者该榜分 / 名次为空
+  DIV: {                                // v3.1 分红指标（--no-dividends → ENABLED false：产出与 v3 逐字节一致）
+    ENABLED: true,
+    DIR: path.join(OUT_DIR, 'dividends'),          // tools/fetch_dividends.js --pass dividends 的缓存
+    PRICE_DIR: path.join(OUT_DIR, 'raw_monthly'),  // tools/fetch_dividends.js --pass prices 的缓存（腾讯不复权月收盘 + 日收盘）
+    STREAK_MIN_FOR_BOARD: 3,            // 红利榜门槛：连续分红年数 ≥ 3
+    TTM_DAYS: 365,                      // 近12月 = (DATA_END − 365d, DATA_END]
+    RECON_TOL_ABS: 0.1, RECON_TOL_REL: 0.002, // 月末对账残差容忍：max(0.1, 0.2% × hfq)
+    RECON_DRIFT_MONTHS: 3,              // 近 12 个月末区间 ≥3 个超容忍 → 'recon_drift'
+    RECON_DRIFT_SHARE: 0.15,            // 或 全部区间中超容忍（无法解释）的占比 > 15% → 'recon_drift'（早年送转 / 股改缺失导致 S 失配、近期价格平稳时也能识别）
+    SYNTH_MAX_YIELD: 0.25,              // 补齐事件的折算现金 ≤ 上一月末不复权价 × 25%（更大的台阶不是现金分红：送转 / 股改 / 配股）；且补齐只在无送转事件的区间
+    WINDOW_LOCAL_RECON: true,           // 全史 recon_drift 时，同窗口视图改用窗口内局部对账（起点因子按首段最小二乘拟合）：窗口内一致则仍给出再投资类指标
+    TR_GAP_MAX: 0.02, NULL_ON_HFQ_GAP: false, // |年化(分红再投资) − 同起点后复权年化| > 2pp → 标记 'hfq_gap'；true 时同时把分红贡献置空
+    LAST_FY: null,                      // 最近一个完整会计年度；null = year(DATA_END) − 1
+  },
   TOP_N: 50,
   ROLL_MONTHS: 60, ROLL_MIN_N: 12,      // 滚动 5 年持有收益：按月末起点，样本 <12 记空
-  VERSION: 'v3',
+  VERSION: 'v3.1',
   WINDOWS: [                            // 同窗口榜：起点固定、终点 = DATA_END；入选 = 全史入选 且 首根 K 线 ≤ start
     { key: '10y', label: '近10年', start: '2016-10-15' },
     { key: '5y', label: '近5年', start: '2021-10-15' },
@@ -653,6 +680,336 @@ function computeWindows(barsTC, secid, benches) {
   return w;
 }
 
+// ------------------------------------------------------------------ dividends (v3.1)
+// 数据：screen/out/dividends/<secid>.json（东财 datacenter RPT_SHAREBONUS_DET 原始行）+ screen/out/raw_monthly/<secid>.json（腾讯不复权 month / day 收盘）。
+// 后复权口径（600519 / 601398 月末逐点验证，残差 ≤0.1）：hfq(t) = S(t)·raw(t) + D(t)，S = 累计送转因子，D = Σ 每股现金 × 除息前持股数（现金不再投资、按持股加总），且 hfq 锚定上市首日（首根 hfq = 真实上市首日收盘）。
+// 对账（reconcileDiv）：相邻价格点的区间残差 R = ΔD − Σ 现金×S_before；|R| ≤ 容忍 = 一致；R 为正台阶且下一区间干净 = 表缺一笔现金（如 600519 2023-12-20 特别分红）→ 补齐事件 src 'hfq'；
+//   近 12 个区间 ≥ RECON_DRIFT_MONTHS 个无法解释 → recon_drift（送转 / 配股与表不符，S 失配后残差随价格漂移）：再投资类指标置空，补齐候选一律不采用（S 失配下的正残差多为噪声，会被误判成分红）。
+const DIV_STATE = { hasPayout: null };  // 派息率列是否输出（computeStage 在写 CSV 前按全市场规则决定）
+const DIV_KEYS = ['data', 'px', 'rawCloseEnd', 'rawCloseDate', 'dpsTTM', 'divYieldTTM', 'divStreak', 'fyFrom', 'fyTo', 'divN', 'divYears', 'avgDivYield', 'payoutRatio', 'dpsCagr', 'cagrTR', 'cagrPx', 'divContrib', 'cagrHfqAligned', 'trFlag', 'trStart', 'trStartKind', 'trEnd', 'nEvents', 'nSynth', 'recon'];
+const divLastFY = () => (CONFIG.DIV.LAST_FY != null ? CONFIG.DIV.LAST_FY : +String(CONFIG.DATA_END).slice(0, 4) - 1);
+const fyByExDate = (ex) => { const y = +ex.slice(0, 4), m = +ex.slice(5, 7); return m <= 8 ? y - 1 : y; }; // 1–8 月除息多为上一年度 年度/中期派息；9–12 月除息的中期 / 特别派息归当年
+function loadDivCache(secid) {
+  const p = path.join(CONFIG.DIV.DIR, secid + '.json');
+  if (!fs.existsSync(p)) return null;
+  try { const j = readJSON(p); return j && Array.isArray(j.rows) ? j : null; } catch (e) { return null; }
+}
+function loadPxCache(secid) {
+  const p = path.join(CONFIG.DIV.PRICE_DIR, secid + '.json');
+  if (!fs.existsSync(p)) return null;
+  try { const j = readJSON(p); return j && Array.isArray(j.month) ? j : null; } catch (e) { return null; }
+}
+const numOr0 = (v) => (v == null || v === '' || !isFinite(+v) ? 0 : +v);
+// 原始行 → 事件（按除息日升序；同日同额同因子去重）：只认「实施」且有除息日且除息日 ≤ DATA_END 的行；现金或送转至少一项 > 0
+function normDivEvents(rows, dataEndT) {
+  const out = [];
+  for (const r of rows) {
+    if (!r || !/实施/.test(String(r.ASSIGN_PROGRESS || '')) || !r.EX_DIVIDEND_DATE) continue;
+    const ex = String(r.EX_DIVIDEND_DATE).slice(0, 10);
+    if (!isYMD(ex)) continue;
+    const exT = E.parseYMD(ex);
+    if (exT > dataEndT) continue;
+    const rep = r.REPORT_DATE ? String(r.REPORT_DATE).slice(0, 10) : null;
+    const cash = numOr0(r.PRETAX_BONUS_RMB) / 10;
+    const bit = r.BONUS_IT_RATIO != null && r.BONUS_IT_RATIO !== '' && isFinite(+r.BONUS_IT_RATIO) ? +r.BONUS_IT_RATIO : numOr0(r.BONUS_RATIO) + numOr0(r.IT_RATIO);
+    const split = 1 + (bit > 0 ? bit : 0) / 10;
+    if (!(cash > 0) && !(split > 1)) continue;
+    const eps = r.BASIC_EPS != null && r.BASIC_EPS !== '' && isFinite(+r.BASIC_EPS) ? +r.BASIC_EPS : null;
+    out.push({ ex, exT, rep, fy: rep && /^\d{4}-/.test(rep) ? +rep.slice(0, 4) : fyByExDate(ex), cash: rd(cash, 6), split: rd(split, 6), eps, isAnnual: !!rep && rep.endsWith('-12-31'), src: 'table' });
+  }
+  const seen = new Set(), ded = [];
+  for (const e of out) { const k = e.ex + '|' + e.cash + '|' + e.split; if (seen.has(k)) continue; seen.add(k); ded.push(e); }
+  ded.sort((a, b) => a.exT - b.exT);
+  return ded;
+}
+// 价格点（日期升序，每点带同日 hfq，无同日 K 线的点跳过）：
+//   [上市首日锚点：首根 hfq K 线，raw = hfq（仅当首个可对照月末的 hfq 与不复权月收盘相差 ≤0.5%，即 hfq 锚定于上市且期间无事件）]
+//   + 月末不复权收盘（≤ DATA_END，不含 DATA_END 所在月 —— 该月由终点代表）+ 终点（day 行里 DATA_END 当日收盘，否则最后一根 ≤ DATA_END 的 day 行）
+function buildPricePoints(px, barsTC, dataEndT) {
+  const hfqMap = new Map(); for (const b of barsTC) hfqMap.set(b[0], b[1]);
+  const endMonth = monthKey(dataEndT);
+  const monthsAll = []; // 全部 ≤ DATA_END 的月收盘（含无 hfq 对照的），供「除息前一月末收盘」查找
+  for (const m of px.month || []) {
+    if (!m || !isYMD(String(m[0])) || !(+m[1] > 0)) continue;
+    const t = E.parseYMD(m[0]);
+    if (t > dataEndT) continue;
+    monthsAll.push({ date: String(m[0]), t, raw: +m[1] });
+  }
+  monthsAll.sort((a, b) => a.t - b.t);
+  const monthly = monthsAll.filter((m) => monthKey(m.t) !== endMonth);
+  let anchor = null;
+  const m0 = monthly.find((m) => hfqMap.has(m.t));
+  if (m0 && barsTC.length && barsTC[0][0] < m0.t && Math.abs(hfqMap.get(m0.t) / m0.raw - 1) <= 0.005) anchor = { date: E.fmtDate(barsTC[0][0]), t: barsTC[0][0], raw: barsTC[0][1], hfq: barsTC[0][1], kind: 'ipo' };
+  const pts = [];
+  if (anchor) pts.push(anchor);
+  for (const m of monthly) { const h = hfqMap.get(m.t); if (h == null || (anchor && m.t <= anchor.t)) continue; pts.push({ date: m.date, t: m.t, raw: m.raw, hfq: h, kind: 'month' }); }
+  let rawEnd = null, term = null;
+  const days = (px.day || []).filter((d) => d && isYMD(String(d[0])) && +d[1] > 0 && E.parseYMD(d[0]) <= dataEndT).sort((a, b) => E.parseYMD(a[0]) - E.parseYMD(b[0]));
+  if (days.length) {
+    const d = days[days.length - 1];
+    rawEnd = { date: String(d[0]), t: E.parseYMD(d[0]), raw: +d[1] };
+    const h = hfqMap.get(rawEnd.t);
+    if (h != null && (!pts.length || rawEnd.t > pts[pts.length - 1].t)) { term = Object.assign({ hfq: h, kind: 'end' }, rawEnd); pts.push(term); }
+  }
+  return { pts, anchor, term, rawEnd, monthsAll, hfqMap };
+}
+// 与后复权序列对账：返回 { events（含补齐事件，按除息日排序，同日表内事件在前）, recon }
+//   S0 = 首个价格点处的累计因子（全史对账 = 1；窗口局部对账 = 窗口起点处的拟合值，见 estimateS0）
+function reconcileDiv(events, pts, cfg, S0) {
+  S0 = S0 || 1;
+  const n = pts.length;
+  const recon = { points: n, intervals: Math.max(0, n - 1), consistent: 0, synth: 0, unexplained: 0, synthDropped: 0, maxResidRel: 0, drift: false };
+  if (n < 2) return { events, recon };
+  const sBefore = new Array(events.length); // 事件除息前持股数 = S0 × Π 更早除息日的送转因子（同日事件共用）
+  { let s = S0, i = 0; while (i < events.length) { let j = i; while (j + 1 < events.length && events[j + 1].exT === events[i].exT) j++; for (let k = i; k <= j; k++) sBefore[k] = s; for (let k = i; k <= j; k++) s *= events[k].split; i = j + 1; } }
+  const Sp = new Array(n), R = new Array(n).fill(0), tol = new Array(n).fill(0), splitIn = new Array(n).fill(false), cashIn = new Array(n).fill(false);
+  let ei = 0, S = S0, prevD = null;
+  for (let p = 0; p < n; p++) {
+    let C = 0;
+    while (ei < events.length && events[ei].exT <= pts[p].t) { C += events[ei].cash * sBefore[ei]; S *= events[ei].split; if (events[ei].split > 1) splitIn[p] = true; if (events[ei].cash > 0) cashIn[p] = true; ei++; }
+    const D = pts[p].hfq - S * pts[p].raw;
+    Sp[p] = S;
+    if (p > 0) { R[p] = D - prevD - C; tol[p] = Math.max(cfg.RECON_TOL_ABS, cfg.RECON_TOL_REL * pts[p].hfq); }
+    prevD = D;
+  }
+  // 分类：ok = 残差在容忍内；shift = 相邻两区间残差一正一负、和在容忍内（表内除息日与 hfq 台阶差一个月）→ 均视为一致；
+  //       step = 正台阶且下一区间干净（或为末区间）；其中 区间内无送转事件 且 折算现金 ≤ 上一月末价 × SYNTH_MAX_YIELD 的 → synth（补齐现金事件），
+  //       否则 rejected（送转 / 股改月份东财因子处理不一，600519 2006-05 股改月即出现 0.59/股的假台阶 —— 不当现金、不计入漂移）；其余 = bad（无法解释）
+  const cls = new Array(n).fill(null); // 'ok' | 'synth' | 'rejected' | 'bad'
+  for (let p = 1; p < n; p++) {
+    if (Math.abs(R[p]) <= tol[p]) { cls[p] = 'ok'; continue; }
+    if (p + 1 < n && R[p] * R[p + 1] < 0 && Math.abs(R[p] + R[p + 1]) <= Math.max(tol[p], tol[p + 1])) { cls[p] = 'ok'; cls[p + 1] = 'ok'; recon.shifted = (recon.shifted || 0) + 1; p++; continue; }
+    if (R[p] > tol[p] && (p === n - 1 || Math.abs(R[p + 1]) <= tol[p + 1])) cls[p] = !splitIn[p] && R[p] / Sp[p] <= cfg.SYNTH_MAX_YIELD * pts[p - 1].raw ? 'synth' : 'rejected';
+    else cls[p] = 'bad';
+  }
+  let badRecent = 0, badTotal = 0; for (let p = 1; p < n; p++) if (cls[p] === 'bad') { badTotal++; if (p >= n - 12) badRecent++; }
+  recon.drift = badRecent >= cfg.RECON_DRIFT_MONTHS || badTotal / (n - 1) > cfg.RECON_DRIFT_SHARE;
+  recon.shifted = recon.shifted || 0; recon.synthRejected = 0;
+  const synth = [];
+  for (let p = 1; p < n; p++) {
+    if (cls[p] === 'ok') { recon.consistent++; recon.maxResidRel = Math.max(recon.maxResidRel, Math.abs(R[p]) / pts[p].hfq); continue; }
+    if (cls[p] === 'rejected') { recon.synthRejected++; continue; }
+    if (cls[p] === 'bad' || recon.drift) { recon.unexplained++; if (cls[p] === 'synth') recon.synthDropped++; recon.maxResidRel = Math.max(recon.maxResidRel, Math.abs(R[p]) / pts[p].hfq); continue; }
+    // co = 同一区间内表里已有现金事件（台阶是「表内金额之外的多出部分」：多为表缺的同日特别股息 —— 601088 2017 特别股息 2.51、300750 2024 特别股息 3.021；
+    //      个别为东财因子重复计入的预案金额 —— 600900 2017-07 多出 0.65，与表内 7.25 之外的「10派6.50」文字一致）；单独统计供报告说明
+    synth.push({ ex: pts[p].date, exT: pts[p].t, rep: null, fy: fyByExDate(pts[p].date), cash: rd(R[p] / Sp[p], 4), split: 1, eps: null, isAnnual: false, src: 'hfq', co: cashIn[p] });
+    recon.synth++; if (cashIn[p]) recon.synthCoincident = (recon.synthCoincident || 0) + 1;
+  }
+  recon.synthCoincident = recon.synthCoincident || 0;
+  recon.maxResidRel = rd(recon.maxResidRel, 6);
+  recon.synthList = synth.map((e) => ({ ex: e.ex, cash: e.cash, fy: e.fy, co: e.co }));
+  const all = synth.length ? events.concat(synth).sort((a, b) => a.exT - b.exT || (a.src === 'hfq' ? 1 : 0) - (b.src === 'hfq' ? 1 : 0)) : events;
+  return { events: all, recon };
+}
+// 窗口局部对账的起点因子 S0：窗口起点后、首个事件之前的月末点上 hfq = S·raw + D 的最小二乘斜率（≥3 个点、raw 极差 ≥ 2% 才可信），否则 null（退回表因子）
+function estimateS0(pts, si, events) {
+  let ei = 0; while (ei < events.length && events[ei].exT <= pts[si].t) ei++;
+  const nextEx = ei < events.length ? events[ei].exT : Infinity;
+  let p1 = si; while (p1 + 1 < pts.length && pts[p1 + 1].t < nextEx) p1++;
+  const seg = pts.slice(si, p1 + 1);
+  if (seg.length < 3) return null;
+  let sr = 0, sh = 0; for (const p of seg) { sr += p.raw; sh += p.hfq; }
+  const mr = sr / seg.length, mh = sh / seg.length;
+  let sxx = 0, sxy = 0, lo = Infinity, hi = -Infinity;
+  for (const p of seg) { sxx += (p.raw - mr) * (p.raw - mr); sxy += (p.raw - mr) * (p.hfq - mh); if (p.raw < lo) lo = p.raw; if (p.raw > hi) hi = p.raw; }
+  if (!(sxx > 0) || (hi - lo) / mr < 0.02) return null;
+  const S = sxy / sxx;
+  return S > 0 ? S : null;
+}
+// 每个视图一套分红指标（键集 DIV_KEYS 相同）：row.div（上市至今）与 row.windows[W.key].div（同窗口；窗口不存在则不设）。同时把事件表存到 row.divEvents（results.json 用）
+function computeDividendViews(row, barsTC) {
+  const cfg = CONFIG.DIV, dataEndT = DATA_END_T(), lastFY = divLastFY();
+  const dc = loadDivCache(row.secid), pc = loadPxCache(row.secid);
+  const base = {}; for (const k of DIV_KEYS) base[k] = null;
+  base.data = dc ? 'ok' : 'missing'; base.px = pc && pc.month.length ? 'ok' : 'missing'; base.fyTo = lastFY;
+  const pp = pc ? buildPricePoints(pc, barsTC, dataEndT) : { pts: [], anchor: null, term: null, rawEnd: null, monthsAll: [], hfqMap: new Map() };
+  if (pp.rawEnd) { base.rawCloseEnd = pp.rawEnd.raw; base.rawCloseDate = pp.rawEnd.date; }
+  const views = [['all', row, +row.listDate.slice(0, 4), null]];
+  for (const W of CONFIG.WINDOWS) if (row.windows && row.windows[W.key]) views.push([W.key, row.windows[W.key], +W.start.slice(0, 4), E.parseYMD(W.start)]);
+  if (!dc) { // 分红数据缺失：只保留结构字段
+    row.divEvents = null;
+    for (const [, v, fyFrom] of views) { v.div = Object.assign({}, base, { fyFrom, divN: Math.max(0, lastFY - fyFrom + 1) }); }
+    return;
+  }
+  const tableEvents = normDivEvents(dc.rows, dataEndT);
+  const rc = reconcileDiv(tableEvents, pp.pts, cfg);
+  let events = rc.events;
+  const recon = rc.recon;
+  recon.scope = 'all'; recon.anchor = !!pp.anchor;
+  const pts = pp.pts;
+  const endIdx = pts.length - 1, endKind = pp.term ? 'end' : 'month';
+  const startIdx = (startT) => { let si = null; for (let i = 0; i < pts.length; i++) { if (pts[i].t <= startT) si = i; else break; } return si; };
+  // 全史漂移时的窗口局部对账：只用窗口起点之后的表内事件与窗口内价格点，起点因子 S0 = 首段最小二乘拟合（失败则用表因子）。
+  //   窗口内一致 → 该窗口用局部事件（表 + 局部补齐）算再投资指标；最长的一致窗口的补齐事件同时并入全局事件表（TTM / 连续分红 / 分红年数 也用上，如 000538 表缺 2024–2026 中期分红）
+  const localRC = {};
+  if (recon.drift && cfg.WINDOW_LOCAL_RECON && base.px === 'ok') {
+    for (const [key, , , startT] of views) {
+      if (key === 'all') continue;
+      const si = startIdx(startT);
+      if (si == null || si >= endIdx) continue;
+      const S0fit = estimateS0(pts, si, tableEvents);
+      let Stab = 1; for (const e of tableEvents) if (e.exT <= pts[si].t) Stab *= e.split;
+      const S0 = S0fit != null ? S0fit : Stab;
+      const lr = reconcileDiv(tableEvents.filter((e) => e.exT > pts[si].t), pts.slice(si), cfg, S0);
+      lr.recon.scope = 'window'; lr.recon.S0 = rd(S0, 4); lr.recon.S0Fit = S0fit != null; lr.recon.S0Table = rd(Stab, 4); lr.recon.anchor = recon.anchor;
+      localRC[key] = { si, events: lr.events, recon: lr.recon };
+    }
+    const best = CONFIG.WINDOWS.map((W) => localRC[W.key]).find((l) => l && !l.recon.drift); // 最长（最早起点）的一致窗口
+    if (best && best.recon.synth > 0) {
+      const extra = best.events.filter((e) => e.src === 'hfq');
+      events = tableEvents.concat(extra).sort((a, b) => a.exT - b.exT || (a.src === 'hfq' ? 1 : 0) - (b.src === 'hfq' ? 1 : 0));
+      recon.synthFromWindow = extra.length;
+    }
+  }
+  // 每股现金折算到当前股本：÷ Sfwd = Π 除息日 ≥ 该事件除息日 的送转因子（同日送转含在内：现金按送转前股数支付）
+  const sFwd = new Array(events.length);
+  { let s = 1, i = events.length - 1; while (i >= 0) { let j = i; while (j - 1 >= 0 && events[j - 1].exT === events[i].exT) j--; for (let k = j; k <= i; k++) s *= events[k].split; for (let k = j; k <= i; k++) sFwd[k] = s; i = j - 1; } }
+  const ttmFrom = dataEndT - cfg.TTM_DAYS;
+  let dpsTTM = 0;
+  const cashFY = new Map(), dpsAdjFY = new Map(), epsFY = new Map();
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (e.exT > ttmFrom) dpsTTM += e.cash / sFwd[i];
+    if (e.fy <= lastFY) {
+      if (e.cash > 0) { cashFY.set(e.fy, (cashFY.get(e.fy) || 0) + e.cash); dpsAdjFY.set(e.fy, (dpsAdjFY.get(e.fy) || 0) + e.cash / sFwd[i]); }
+      if (e.src === 'table' && e.isAnnual && e.eps != null && e.eps > 0 && !epsFY.has(e.fy)) epsFY.set(e.fy, e.eps);
+    }
+  }
+  let streak = 0; for (let fy = lastFY; cashFY.has(fy); fy--) streak++;
+  base.dpsTTM = rd(dpsTTM, 4);
+  base.divYieldTTM = base.rawCloseEnd ? rd(dpsTTM / base.rawCloseEnd, 4) : null;
+  base.divStreak = streak;
+  base.nEvents = events.length; base.nSynth = events.filter((e) => e.src === 'hfq').length; base.recon = recon;
+  // 除息前一月末不复权收盘：按日历月查；缺则取除息月之前最近一个月收盘；再缺取上市首日锚点
+  const byYM = new Map(); for (const m of pp.monthsAll) byYM.set(m.date.slice(0, 7), m.raw);
+  const prevMonthClose = (exT) => {
+    const d = E.tToDate(exT), y = d.getUTCFullYear(), mo = d.getUTCMonth(); // 0 起
+    const py = mo === 0 ? y - 1 : y, pm = mo === 0 ? 11 : mo - 1;
+    const direct = byYM.get(py + '-' + String(pm + 1).padStart(2, '0'));
+    if (direct != null) return direct;
+    const firstOfMonth = Date.UTC(y, mo, 1) / DAY;
+    let best = null; for (const m of pp.monthsAll) { if (m.t < firstOfMonth) best = m.raw; else break; }
+    if (best != null) return best;
+    return pp.anchor ? pp.anchor.raw : null;
+  };
+  let skippedYield = 0;
+  const yieldByEvent = events.map((e) => { if (!(e.cash > 0) || e.fy > lastFY) return null; const p = prevMonthClose(e.exT); if (!(p > 0)) { skippedYield++; return null; } return e.cash / p; });
+  recon.skippedYield = skippedYield;
+  // 再投资 / 纯价格 / 同起点后复权 年化：从起点 si 走到终点（终点 = DATA_END 当日点，否则最后一个月末点）
+  const trMetrics = (si, evs) => {
+    if (si == null || si < 0 || si >= endIdx) return null;
+    const p0 = pts[si], p1 = pts[endIdx], years = (p1.t - p0.t) / 365.25;
+    if (!(years > 0)) return null;
+    let shares = 1, cumSplit = 1, ei = 0;
+    while (ei < evs.length && evs[ei].exT <= p0.t) ei++;
+    for (let p = si + 1; p <= endIdx; p++) {
+      while (ei < evs.length && evs[ei].exT <= pts[p].t) { const e = evs[ei++]; const cash = shares * e.cash; shares *= e.split; cumSplit *= e.split; shares += cash / pts[p].raw; }
+    }
+    return { cagrTR: Math.pow(shares * p1.raw / p0.raw, 1 / years) - 1, cagrPx: Math.pow(cumSplit * p1.raw / p0.raw, 1 / years) - 1, cagrHfqAligned: Math.pow(p1.hfq / p0.hfq, 1 / years) - 1, years };
+  };
+  row.divEvents = events.map((e) => Object.assign({ ex: e.ex, fy: e.fy, cash: e.cash, split: e.split, src: e.src, rep: e.rep, eps: e.eps }, e.src === 'hfq' ? { co: !!e.co } : null));
+  for (const [key, v, fyFrom, startT] of views) {
+    const d = Object.assign({}, base);
+    d.fyFrom = fyFrom; d.divN = Math.max(0, lastFY - fyFrom + 1);
+    let years = 0, sumCash = 0, sumEps = 0, sumYield = 0;
+    const payingFys = [];
+    for (let fy = fyFrom; fy <= lastFY; fy++) {
+      if (!cashFY.has(fy)) continue;
+      years++; payingFys.push(fy);
+      if (epsFY.has(fy)) { sumCash += cashFY.get(fy); sumEps += epsFY.get(fy); }
+    }
+    d.divYears = years;
+    for (let i = 0; i < events.length; i++) if (yieldByEvent[i] != null && events[i].fy >= fyFrom) sumYield += yieldByEvent[i];
+    d.avgDivYield = base.px === 'ok' && d.divN > 0 ? rd(sumYield / d.divN, 4) : null;
+    d.payoutRatio = sumEps > 0 ? rd(sumCash / sumEps, 4) : null;
+    if (payingFys.length >= 3) { const f0 = payingFys[0], f1 = payingFys[payingFys.length - 1], a = dpsAdjFY.get(f0), b = dpsAdjFY.get(f1); d.dpsCagr = f1 > f0 && a > 0 && b > 0 ? rd(Math.pow(b / a, 1 / (f1 - f0)) - 1, 4) : null; }
+    const si = pts.length >= 2 ? (key === 'all' ? 0 : startIdx(startT)) : null;
+    let evs = events, drift = recon.drift;
+    if (localRC[key]) { d.recon = localRC[key].recon; drift = localRC[key].recon.drift; if (!drift) evs = localRC[key].events; }
+    const tm = base.px === 'ok' ? trMetrics(si, evs) : null;
+    if (!tm) d.trFlag = 'px_missing';
+    else {
+      d.trStart = pts[si].date; d.trStartKind = pts[si].kind === 'ipo' ? 'ipo' : 'month'; d.trEnd = pts[endIdx].date;
+      d.cagrHfqAligned = rd(tm.cagrHfqAligned, 4);
+      if (drift) d.trFlag = 'recon_drift';
+      else {
+        d.cagrTR = rd(tm.cagrTR, 4); d.cagrPx = rd(tm.cagrPx, 4); d.divContrib = rd(tm.cagrTR - tm.cagrPx, 4);
+        if (Math.abs(tm.cagrTR - tm.cagrHfqAligned) > cfg.TR_GAP_MAX) { d.trFlag = 'hfq_gap'; if (cfg.NULL_ON_HFQ_GAP) d.divContrib = null; }
+        else d.trFlag = endKind === 'month' ? 'trend_month' : null;
+      }
+    }
+    v.div = d;
+  }
+}
+// 分红数据读取 / 计算出错时的占位（data 'error'），保证每个视图都有同键集的 div
+function setDivError(row, msg) {
+  const base = {}; for (const k of DIV_KEYS) base[k] = null;
+  base.data = 'error'; base.px = 'missing'; base.recon = { error: String(msg).slice(0, 200) };
+  row.div = Object.assign({}, base);
+  if (row.windows) for (const W of CONFIG.WINDOWS) if (row.windows[W.key]) row.windows[W.key].div = Object.assign({}, base);
+}
+// 全市场汇总（run_meta.dividends）；同时决定 hasPayout
+function dividendSummary(elig, dataEndT) {
+  const cfg = CONFIG.DIV, lastFY = divLastFY();
+  const ds = { lastFY, ttmRange: [E.fmtDate(dataEndT - cfg.TTM_DAYS), CONFIG.DATA_END], eligible: elig.length, dataOk: 0, dataMissing: 0, dataError: 0, pxOk: 0, pxMissing: 0, rawCloseEndMissing: 0, anchorIpo: 0,
+    synthEvents: 0, stocksWithSynth: 0, synthCoincidentEvents: 0, synthFromWindowEvents: 0, synthDroppedEvents: 0, synthRejectedSteps: 0, shiftedIntervals: 0, unexplainedStocks: 0, driftStocks: 0, driftViews: {}, localReconOk: {}, localReconDrift: {}, hfqGapStocks: {}, trendMonthStocks: {}, pxMissingStocks: {}, trGap: {}, ttm: {}, streakHist: { 0: 0, '1-2': 0, '3-4': 0, '5-9': 0, '10-19': 0, '20+': 0 },
+    paying10of10: 0, payingGe8of10: 0, listedBy2016: 0, zeroDividendStocks: 0, payersWithPayout: 0, payers: 0, sanity600519: null, hasPayout: null, hasPayoutReason: '', hfqMethod: '', config: cfg, boardSizes: {} };
+  const viewKeys = ['all'].concat(CONFIG.WINDOWS.map((W) => W.key));
+  const gaps = {}, gapsVsCagr = [];
+  for (const k of viewKeys) { ds.hfqGapStocks[k] = 0; ds.trendMonthStocks[k] = 0; ds.pxMissingStocks[k] = 0; ds.driftViews[k] = 0; ds.localReconOk[k] = 0; ds.localReconDrift[k] = 0; ds.boardSizes[k] = 0; gaps[k] = []; }
+  const ttmAll = [], ttmPayers = [];
+  let ttmMax = -1, ttmMaxCode = null;
+  const bucket = (s) => (s === 0 ? '0' : s <= 2 ? '1-2' : s <= 4 ? '3-4' : s <= 9 ? '5-9' : s <= 19 ? '10-19' : '20+');
+  for (const r of elig) {
+    const d = r.div;
+    if (!d) continue;
+    if (d.data === 'error') { ds.dataError++; continue; }
+    if (d.data !== 'ok') { ds.dataMissing++; continue; }
+    ds.dataOk++;
+    if (d.px === 'ok') ds.pxOk++; else ds.pxMissing++;
+    if (d.rawCloseEnd == null) ds.rawCloseEndMissing++;
+    if (d.recon && d.recon.anchor) ds.anchorIpo++;
+    if (d.nSynth > 0) { ds.synthEvents += d.nSynth; ds.stocksWithSynth++; ds.synthCoincidentEvents += (r.divEvents || []).filter((e) => e.src === 'hfq' && e.co).length; ds.synthFromWindowEvents += d.recon && d.recon.synthFromWindow ? d.recon.synthFromWindow : 0; }
+    if (d.recon) { ds.synthDroppedEvents += d.recon.synthDropped || 0; ds.synthRejectedSteps += d.recon.synthRejected || 0; ds.shiftedIntervals += d.recon.shifted || 0; if (d.recon.unexplained > 0) ds.unexplainedStocks++; if (d.recon.drift) ds.driftStocks++; }
+    if (d.divYieldTTM != null) { ttmAll.push(d.divYieldTTM); if (d.divYieldTTM > 0) ttmPayers.push(d.divYieldTTM); if (d.divYieldTTM > ttmMax) { ttmMax = d.divYieldTTM; ttmMaxCode = r.code; } }
+    ds.streakHist[bucket(d.divStreak)]++;
+    const payingFY = new Set(); for (const e of r.divEvents || []) if (e.cash > 0 && e.fy <= lastFY) payingFY.add(e.fy);
+    if (payingFY.size === 0) ds.zeroDividendStocks++;
+    else { ds.payers++; if (d.payoutRatio != null) ds.payersWithPayout++; }
+    if (+r.listDate.slice(0, 4) <= 2016) { ds.listedBy2016++; let n10 = 0; for (let fy = 2016; fy <= 2025; fy++) if (payingFY.has(fy)) n10++; if (n10 === 10) ds.paying10of10++; if (n10 >= 8) ds.payingGe8of10++; }
+    for (const k of viewKeys) {
+      const v = k === 'all' ? r : r.windows && r.windows[k];
+      if (!v || !v.div) continue;
+      const dv = v.div;
+      if (dv.trFlag === 'hfq_gap') ds.hfqGapStocks[k]++; else if (dv.trFlag === 'trend_month') ds.trendMonthStocks[k]++; else if (dv.trFlag === 'px_missing') ds.pxMissingStocks[k]++; else if (dv.trFlag === 'recon_drift') ds.driftViews[k]++;
+      if (k !== 'all' && dv.recon && dv.recon.scope === 'window') { if (dv.recon.drift) ds.localReconDrift[k]++; else ds.localReconOk[k]++; }
+      if (dv.cagrTR != null && dv.cagrHfqAligned != null) gaps[k].push(Math.abs(dv.cagrTR - dv.cagrHfqAligned));
+      if (k === 'all' && dv.cagrTR != null && r.cagr != null) gapsVsCagr.push(Math.abs(dv.cagrTR - r.cagr));
+      if (v.th && v.th[String(CONFIG.THRESHOLDS[0])] && v.th[String(CONFIG.THRESHOLDS[0])].dividend != null) ds.boardSizes[k]++;
+    }
+    if (r.code === '600519') {
+      const cash = {}, eps = {};
+      for (const e of r.divEvents || []) { if (e.cash > 0) cash[e.fy] = rd((cash[e.fy] || 0) + e.cash, 6); if (e.src === 'table' && e.rep && e.rep.endsWith('-12-31') && e.eps > 0 && eps[e.fy] == null) eps[e.fy] = e.eps; }
+      const synth = (r.divEvents || []).filter((e) => e.src === 'hfq');
+      ds.sanity600519 = { divStreak: d.divStreak, dpsTTM: d.dpsTTM, divYieldTTM: d.divYieldTTM, rawCloseEnd: d.rawCloseEnd, nSynth: d.nSynth, synth, unexplained: d.recon && d.recon.unexplained, fy2024Cash: cash[2024] || null, fy2024Eps: eps[2024] || null, fy2024Payout: cash[2024] && eps[2024] ? rd(cash[2024] / eps[2024], 4) : null, payoutRatioAll: d.payoutRatio, cagr: r.cagr, cagrTR: d.cagrTR, cagrPx: d.cagrPx, cagrHfqAligned: d.cagrHfqAligned, trFlag: d.trFlag };
+    }
+  }
+  const stat = (arr) => { if (!arr.length) return { n: 0, median: null, p90: null }; const s = arr.slice().sort((a, b) => a - b); return { n: s.length, median: rd(quantile(s, 0.5), 4), p90: rd(quantile(s, 0.9), 4), max: rd(s[s.length - 1], 4) }; };
+  for (const k of viewKeys) ds.trGap[k] = stat(gaps[k]);
+  ds.trGap.all.vsCagr = stat(gapsVsCagr);
+  { const s = ttmAll.slice().sort((a, b) => a - b), sp = ttmPayers.slice().sort((a, b) => a - b); ds.ttm = { n: s.length, medianAll: rd(quantile(s, 0.5), 4), q1All: rd(quantile(s, 0.25), 4), q3All: rd(quantile(s, 0.75), 4), p90All: rd(quantile(s, 0.9), 4), nPayers: sp.length, medianPayers: rd(quantile(sp, 0.5), 4), max: ttmMax >= 0 ? ttmMax : null, maxCode: ttmMaxCode }; }
+  // 派息率开关：≥80% 的「至少一个分红年度」个股有上市至今派息率，且 600519 FY2024 派息率 = (27.673 + 23.882) / 68.64 ∈ [0.70, 0.80]
+  const share = ds.payers ? ds.payersWithPayout / ds.payers : 0;
+  const s519 = ds.sanity600519 && ds.sanity600519.fy2024Payout;
+  const ok519 = s519 != null && s519 >= 0.70 && s519 <= 0.80;
+  ds.hasPayout = share >= 0.8 && ok519;
+  ds.hasPayoutReason = 'payers with payoutRatio ' + ds.payersWithPayout + '/' + ds.payers + ' = ' + rd(share, 4) + (share >= 0.8 ? ' ≥ 0.8' : ' < 0.8') + '; 600519 FY2024 payout ' + (s519 == null ? 'n/a' : s519) + (ok519 ? ' ∈ [0.70, 0.80]' : ' ∉ [0.70, 0.80]') + ' → hasPayout ' + ds.hasPayout;
+  // 后复权口径诊断（600519 / 601398 的月末对账结果）
+  const diag = (code) => { const r = elig.find((x) => x.code === code); if (!r || !r.div || !r.div.recon) return code + ': n/a'; const rc = r.div.recon; return code + ': ' + rc.consistent + '/' + rc.intervals + ' month-end intervals within max(0.1, 0.2%·hfq), synth ' + rc.synth + (r.divEvents ? r.divEvents.filter((e) => e.src === 'hfq').map((e) => ' (' + e.ex + ' cash ' + e.cash + ' fy' + e.fy + ')').join('') : '') + ', unexplained ' + rc.unexplained + ', drift ' + rc.drift + ', anchor ' + rc.anchor; };
+  ds.hfqMethod = 'additive-cash/multiplicative-split: hfq(t) = S(t)·raw(t) + D(t), anchored at listing; ' + diag('600519') + '; ' + diag('601398');
+  return ds;
+}
+
 // ------------------------------------------------------------------ ranking
 // 百分位（0~1，越高越好；并列取平均名次）
 function percentiles(vals) {
@@ -680,6 +1037,11 @@ function rankView(rows, view) {
     cagr: (r) => view(r).cagr, calmar: (r) => view(r).calmar, maxDD: (r) => view(r).maxDD, roll5yP10: (r) => (view(r).roll5y ? view(r).roll5y.p10 : null),
     avgBearRet: (r, T) => view(r).th[T].avgBearRet, bullNewHighRate: (r, T) => view(r).th[T].bullNewHighRate, avgBullRet: (r, T) => view(r).th[T].avgBullRet, bearHigherLowRate: (r, T) => view(r).th[T].bearHigherLowRate,
   };
+  if (CONFIG.DIV.ENABLED) { // v3.1：分红百分位（分红数据缺失 / 出错 → 空，不参与）；综合分权重 0，只用于红利榜与 CSV pct 列
+    const dv = (r) => (view(r).div && view(r).div.data === 'ok' ? view(r).div : null);
+    metricGetters.divYieldTTM = (r) => { const d = dv(r); return d ? d.divYieldTTM : null; };
+    metricGetters.divStreak = (r) => { const d = dv(r); return d ? d.divStreak : null; };
+  }
   for (const Tn of CONFIG.THRESHOLDS) {
     const T = String(Tn);
     const pct = {};
@@ -690,10 +1052,11 @@ function rankView(rows, view) {
       let ws = 0, s = 0;
       for (const k of Object.keys(CONFIG.COMPOSITE_WEIGHTS)) if (th.pct[k] != null) { ws += CONFIG.COMPOSITE_WEIGHTS[k]; s += CONFIG.COMPOSITE_WEIGHTS[k] * th.pct[k]; }
       th.composite = ws ? rd(s / ws) : null;
-      th.compositeN = Object.keys(CONFIG.COMPOSITE_WEIGHTS).filter((k) => th.pct[k] != null).length;
+      th.compositeN = Object.keys(CONFIG.COMPOSITE_WEIGHTS).filter((k) => CONFIG.COMPOSITE_WEIGHTS[k] > 0 && th.pct[k] != null).length; // 只数正权重项（权重 0 的分红项不计）
       for (const b of Object.keys(CONFIG.BOARDS)) {
         const ks = CONFIG.BOARDS[b], avail = ks.filter((k) => th.pct[k] != null);
-        th[b] = (CONFIG.BOARD_REQUIRE_ALL[b] ? avail.length === ks.length : avail.length > 0) ? rd(avail.reduce((a, k) => a + th.pct[k], 0) / avail.length) : null;
+        const gate = CONFIG.BOARD_GATE && CONFIG.BOARD_GATE[b]; // 入围门槛（红利榜：分红数据 ok 且连续分红 ≥ STREAK_MIN_FOR_BOARD）
+        th[b] = gate && !gate(view(r)) ? null : (CONFIG.BOARD_REQUIRE_ALL[b] ? avail.length === ks.length : avail.length > 0) ? rd(avail.reduce((a, k) => a + th.pct[k], 0) / avail.length) : null;
       }
     });
     rankBy(rows, (r) => view(r).th[T].composite, (r, k) => { view(r).th[T].rank = k; }, view);
@@ -723,7 +1086,7 @@ function csvCell(v) {
 function csvColumns(T) {
   const g = (f) => (r) => { try { return f(r); } catch (e) { return null; } };
   const th = (f) => g((r) => f(r.th[T]));
-  return [
+  const cols = [
     ['代码', (r) => r.code], ['名称', (r) => r.name], ['市场', (r) => (r.market === 1 ? '沪' : '深')], ['板块', (r) => r.board], ['secid', (r) => r.secid], ['行业', (r) => r.industry],
     ['总市值(亿)', (r) => (r.mcap != null ? rd(r.mcap / 1e8, 2) : null)], ['上市日(f26)', (r) => r.listDateF26],
     ['入选', (r) => r.eligible], ['剔除原因', (r) => r.excluded_reason],
@@ -748,6 +1111,21 @@ function csvColumns(T) {
     ['看板', th((x) => x.link)],
     ['数据源', () => (isTx() ? '腾讯hfq' : '东财fqt2')],
   ];
+  if (CONFIG.DIV.ENABLED) { // v3.1 分红列：一律追加在「数据源」之后（上市至今视图 + 与区间无关的字段）；非入选行 r.div 为 undefined → g() 捕获 → 空
+    const dv = (f) => g((r) => f(r.div));
+    cols.push(
+      ['分红数据', dv((d) => d.data)], ['不复权收盘(数据截止日)', dv((d) => d.rawCloseEnd)], ['不复权收盘日', dv((d) => d.rawCloseDate)],
+      ['每股分红TTM(税前)', dv((d) => d.dpsTTM)], ['股息率(近12月)', dv((d) => d.divYieldTTM)], ['连续分红年数', dv((d) => d.divStreak)],
+      ['首个会计年度', dv((d) => d.fyFrom)], ['分红年数(上市至今)', dv((d) => d.divYears)], ['会计年度数(上市至今)', dv((d) => d.divN)], ['平均股息率(上市至今)', dv((d) => d.avgDivYield)],
+    );
+    if (DIV_STATE.hasPayout) cols.push(['派息率(上市至今)', dv((d) => d.payoutRatio)]);
+    cols.push(
+      ['分红增长(上市至今)', dv((d) => d.dpsCagr)], ['年化(分红再投资)', dv((d) => d.cagrTR)], ['纯价格年化', dv((d) => d.cagrPx)], ['分红贡献', dv((d) => d.divContrib)], ['分红贡献标记', dv((d) => d.trFlag)],
+      ['年化(后复权,同起点)', dv((d) => d.cagrHfqAligned)], ['再投资起点', dv((d) => d.trStart)], ['分红事件数', dv((d) => d.nEvents)], ['补齐事件数', dv((d) => d.nSynth)],
+      ['红利分', th((x) => x.dividend)], ['红利排名', th((x) => x.dividendRank)], ['pct_股息率TTM', th((x) => x.pct.divYieldTTM)], ['pct_连续分红', th((x) => x.pct.divStreak)],
+    );
+  }
+  return cols;
 }
 function writeCSV(p, results, T) {
   const cols = csvColumns(T);
@@ -788,6 +1166,18 @@ function csvColumnsWindow(W) {
     );
   }
   cols.push(['数据源', () => (isTx() ? '腾讯hfq' : '东财fqt2')]);
+  if (CONFIG.DIV.ENABLED) { // v3.1 分红列（窗口视图），追加在「数据源」之后；红利分 / 红利排名与阈值无关，取 30% 一份
+    const dv = (f) => g((r, w) => f(w.div));
+    cols.push(
+      ['分红数据', dv((d) => d.data)], ['每股分红TTM(税前)', dv((d) => d.dpsTTM)], ['股息率(近12月)', dv((d) => d.divYieldTTM)], ['连续分红年数', dv((d) => d.divStreak)],
+      ['分红年数(窗口)', dv((d) => d.divYears)], ['会计年度数(窗口)', dv((d) => d.divN)], ['平均股息率(窗口)', dv((d) => d.avgDivYield)],
+    );
+    if (DIV_STATE.hasPayout) cols.push(['派息率(窗口)', dv((d) => d.payoutRatio)]);
+    cols.push(
+      ['分红增长(窗口)', dv((d) => d.dpsCagr)], ['年化(分红再投资)', dv((d) => d.cagrTR)], ['纯价格年化', dv((d) => d.cagrPx)], ['分红贡献', dv((d) => d.divContrib)], ['分红贡献标记', dv((d) => d.trFlag)], ['年化(后复权,同起点)', dv((d) => d.cagrHfqAligned)],
+      ['红利分', g((r, w) => w.th[String(CONFIG.THRESHOLDS[0])].dividend)], ['红利排名', g((r, w) => w.th[String(CONFIG.THRESHOLDS[0])].dividendRank)],
+    );
+  }
   return cols;
 }
 function writeWindowCSV(p, rows, W) {
@@ -852,6 +1242,10 @@ function computeStage(universe, targets, meta, todayT) {
           else if (row.stale) row.excluded_reason = 'stale';
           // 同窗口视图（只对入选个股算；窗口入选 = 首根 K 线 ≤ 窗口起点）
           if (!row.excluded_reason) row.windows = computeWindows(d.bars, u.secid, benches);
+          // v3.1 分红指标（只对入选个股算；单只缓存损坏不中断全量：记 data 'error' + checks.errors）
+          if (!row.excluded_reason && CONFIG.DIV.ENABLED) {
+            try { computeDividendViews(row, d.bars); } catch (e) { setDivError(row, e.message); checks.errors.push({ secid: u.secid, stage: 'dividends', error: e.message }); }
+          }
           // 一致性自检（全史 + 各非空窗口；熊市轮数随阈值非降只在全史上检查）
           const views = [row.th]; if (row.windows) for (const W of CONFIG.WINDOWS) if (row.windows[W.key]) views.push(row.windows[W.key].th);
           for (let vi = 0; vi < views.length; vi++) {
@@ -880,6 +1274,15 @@ function computeStage(universe, targets, meta, todayT) {
   const rk = rankStage(results);
   const nElig = rk.eligible;
   log('computed=' + checks.computed + ' eligible=' + nElig + ' windows=' + JSON.stringify(rk.windows) + ' checks=' + JSON.stringify(checks));
+  // v3.1 分红汇总（排名之后、写 CSV 之前）：决定 hasPayout；为 false 时所有视图的派息率置空，CSV 不输出该列
+  let dividends = null;
+  if (CONFIG.DIV.ENABLED) {
+    dividends = dividendSummary(elig, DATA_END_T());
+    DIV_STATE.hasPayout = dividends.hasPayout;
+    if (!dividends.hasPayout) for (const r of elig) { if (r.div) r.div.payoutRatio = null; if (r.windows) for (const W of CONFIG.WINDOWS) if (r.windows[W.key] && r.windows[W.key].div) r.windows[W.key].div.payoutRatio = null; }
+    log('dividends: dataOk=' + dividends.dataOk + ' dataMissing=' + dividends.dataMissing + ' dataError=' + dividends.dataError + ' pxOk=' + dividends.pxOk + ' pxMissing=' + dividends.pxMissing + ' rawCloseEndMissing=' + dividends.rawCloseEndMissing + ' synthEvents=' + dividends.synthEvents + ' (stocks ' + dividends.stocksWithSynth + ', dropped ' + dividends.synthDroppedEvents + ') driftStocks=' + dividends.driftStocks + ' unexplainedStocks=' + dividends.unexplainedStocks + ' hfqGap=' + JSON.stringify(dividends.hfqGapStocks) + ' boardSizes=' + JSON.stringify(dividends.boardSizes) + ' ttmMedianAll=' + dividends.ttm.medianAll + ' hasPayout=' + dividends.hasPayout + ' (' + dividends.hasPayoutReason + ')');
+    log('dividends: ' + dividends.hfqMethod);
+  }
   // outputs：results / benchmarks 为工作文件（screen/out，不入库）；universe / CSV / run_meta 入库（screen/）
   writeRows(P_OUT('results.json'), results);
   writeJSON(P_OUT('benchmarks.json'), benchRows, true);
@@ -911,6 +1314,7 @@ function computeStage(universe, targets, meta, todayT) {
     const o = { code, name: r.name, board: r.board, listDate: r.listDate, found: true, eligible: r.eligible, excluded_reason: r.excluded_reason, cagr: r.cagr, maxDD: r.maxDD, ranks: {}, winRanks: {} };
     for (const T of CONFIG.THRESHOLDS) o.ranks[String(T)] = r.th && r.th[String(T)] ? r.th[String(T)].rank : null;
     for (const W of CONFIG.WINDOWS) { o.winRanks[W.key] = {}; for (const T of CONFIG.THRESHOLDS) o.winRanks[W.key][String(T)] = r.windows && r.windows[W.key] ? r.windows[W.key].th[String(T)].rank : null; }
+    if (CONFIG.DIV.ENABLED && r.div) o.div = { data: r.div.data, px: r.div.px, divStreak: r.div.divStreak, divYieldTTM: r.div.divYieldTTM, divYears: r.div.divYears, divN: r.div.divN, nSynth: r.div.nSynth, trFlag: r.div.trFlag, cagrTR: r.div.cagrTR, divContrib: r.div.divContrib, dividendRank: r.th && r.th[String(CONFIG.THRESHOLDS[0])] ? r.th[String(CONFIG.THRESHOLDS[0])].dividendRank : null };
     return o;
   };
   Object.assign(meta, {
@@ -919,7 +1323,8 @@ function computeStage(universe, targets, meta, todayT) {
     finishedAt: nowIso(), dataEndDate, universeCount: universe.length, targetCount: targets.length, computedCount: checks.computed,
     eligibleCount: nElig, exclusionCounts, boardCounts, universeFetch, universeProvenance, fetchFailures: failures.length, failedSecids: failures.map((f) => f.secid), checks,
     windows: CONFIG.WINDOWS.map((W) => ({ key: W.key, label: W.label, start: W.start, end: CONFIG.DATA_END, eligible: rk.windows[W.key] })),
-    config: { THRESHOLDS: CONFIG.THRESHOLDS, MIN_YEARS: CONFIG.MIN_YEARS, STALE_DAYS: CONFIG.STALE_DAYS, DATA_END: CONFIG.DATA_END, FQT: CONFIG.FQT, SOURCE: CONFIG.SOURCE, COMPOSITE_WEIGHTS: CONFIG.COMPOSITE_WEIGHTS, BOARDS: CONFIG.BOARDS, ROLL_MONTHS: CONFIG.ROLL_MONTHS, VERSION: CONFIG.VERSION, WINDOWS: CONFIG.WINDOWS, MIN_CYCLES_FOR_RATE: CONFIG.MIN_CYCLES_FOR_RATE, FIRST_BEAR_DEPTH: CONFIG.FIRST_BEAR_DEPTH, UNIVERSE_SEGMENTS: CONFIG.UNIVERSE_SEGMENTS },
+    config: { THRESHOLDS: CONFIG.THRESHOLDS, MIN_YEARS: CONFIG.MIN_YEARS, STALE_DAYS: CONFIG.STALE_DAYS, DATA_END: CONFIG.DATA_END, FQT: CONFIG.FQT, SOURCE: CONFIG.SOURCE, COMPOSITE_WEIGHTS: CONFIG.COMPOSITE_WEIGHTS, BOARDS: CONFIG.BOARDS, BOARD_REQUIRE_ALL: CONFIG.BOARD_REQUIRE_ALL, ROLL_MONTHS: CONFIG.ROLL_MONTHS, VERSION: CONFIG.VERSION, WINDOWS: CONFIG.WINDOWS, MIN_CYCLES_FOR_RATE: CONFIG.MIN_CYCLES_FOR_RATE, FIRST_BEAR_DEPTH: CONFIG.FIRST_BEAR_DEPTH, UNIVERSE_SEGMENTS: CONFIG.UNIVERSE_SEGMENTS, DIV: CONFIG.DIV },
+    dividends,
     sanity: CONFIG.SANITY_CODES.map(sanityRow),
   });
   writeJSON(P_PUB('run_meta.json'), meta, true);
@@ -949,10 +1354,12 @@ function v2Checks(elig, checks) {
 // ------------------------------------------------------------------ main
 const isYMD = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && E.fmtDate(E.parseYMD(s)) === s;
 function parseArgs(argv) {
-  const a = { sample: null, codes: null, fetchOnly: false, computeOnly: false, universeOnly: false, refreshUniverse: false, source: CONFIG.SOURCE, dataEnd: CONFIG.DATA_END };
+  const a = { sample: null, codes: null, fetchOnly: false, computeOnly: false, universeOnly: false, refreshUniverse: false, source: CONFIG.SOURCE, dataEnd: CONFIG.DATA_END, today: null, noDividends: false };
   for (let i = 0; i < argv.length; i++) {
     const s = argv[i];
     if (s === '--sample') a.sample = parseInt(argv[++i], 10);
+    else if (s === '--today') { a.today = String(argv[++i] || ''); if (!isYMD(a.today)) throw new Error('--today must be YYYY-MM-DD (got "' + a.today + '")'); } // 固定 f26 预剔除的判定日（复现早先运行）
+    else if (s === '--no-dividends') a.noDividends = true; // 关闭 v3.1 分红指标：产出与 v3 逐字节一致
     else if (s === '--codes') a.codes = String(argv[++i]).split(',').map((x) => x.trim()).filter(Boolean);
     else if (s === '--fetch-only') a.fetchOnly = true;
     else if (s === '--compute-only') a.computeOnly = true;
@@ -983,9 +1390,14 @@ async function main() {
   CONFIG.KLINE_DIR = isTx() ? CONFIG.KLINE_DIR_TX : CONFIG.KLINE_DIR_EM;
   SUBSET_RUN = !!(args.codes || args.sample != null);
   if (args.dataEnd !== 'auto') CONFIG.TX.END_DATE = args.dataEnd; // 腾讯线固定区间终点与 --data-end 对齐
+  if (args.noDividends) { // v3.1 分红指标关闭：去掉两项权重 0 的键与红利榜，排名逻辑 / CSV 列与 v3 完全一致
+    CONFIG.DIV.ENABLED = false;
+    delete CONFIG.COMPOSITE_WEIGHTS.divYieldTTM; delete CONFIG.COMPOSITE_WEIGHTS.divStreak;
+    delete CONFIG.BOARDS.dividend; delete CONFIG.BOARD_REQUIRE_ALL.dividend; delete CONFIG.BOARD_GATE.dividend;
+  }
   ensureDirs();
-  const meta = { startedAt: nowIso(), args, source: CONFIG.SOURCE, klineDir: CONFIG.KLINE_DIR, mode: args.computeOnly ? 'compute-only' : args.universeOnly ? 'universe-only' : args.fetchOnly ? 'fetch-only' : 'full', dataEndSpec: args.dataEnd, node: process.version, pid: process.pid };
-  const todayT = Math.floor(Date.now() / DAY);
+  const todayT = args.today ? E.parseYMD(args.today) : Math.floor(Date.now() / DAY); // 「今天」：f26 预剔除 上市<5年 的判定日（--today 固定以复现早先运行）
+  const meta = { startedAt: nowIso(), args, source: CONFIG.SOURCE, klineDir: CONFIG.KLINE_DIR, mode: args.computeOnly ? 'compute-only' : args.universeOnly ? 'universe-only' : args.fetchOnly ? 'fetch-only' : 'full', dataEndSpec: args.dataEnd, today: E.fmtDate(todayT), todaySpec: args.today || 'system', dividendsEnabled: CONFIG.DIV.ENABLED, node: process.version, pid: process.pid };
   log('start ' + JSON.stringify(meta));
   // 1. 股票池
   const uPath = P_UNIVERSE();

@@ -1,5 +1,5 @@
 {
- "startedAt": "2026-10-21T05:24:55.503Z",
+ "startedAt": "2026-10-29T10:32:52.807Z",
  "args": {
   "sample": null,
   "codes": null,
@@ -8,14 +8,19 @@
   "universeOnly": false,
   "refreshUniverse": false,
   "source": "eastmoney",
-  "dataEnd": "2026-10-15"
+  "dataEnd": "2026-10-15",
+  "today": "2026-10-21",
+  "noDividends": false
  },
  "source": "eastmoney",
- "klineDir": "c:\\Users\\wuminqia\\Documents\\Amazon\\Kiro\\20261015_bull_bear_screen\\astock-perf\\screen\\out\\klines",
+ "klineDir": "C:\\Users\\wuminqia\\Documents\\Amazon\\Kiro\\20261015_bull_bear_screen\\astock-perf\\screen\\out\\klines",
  "mode": "compute-only",
  "dataEndSpec": "2026-10-15",
+ "today": "2026-10-21",
+ "todaySpec": "2026-10-21",
+ "dividendsEnabled": true,
  "node": "v25.6.0",
- "pid": 29004,
+ "pid": 2680,
  "dataEnd": "2026-10-15",
  "dataEndMode": "fixed",
  "fetch": {
@@ -39,12 +44,12 @@
   "aborted": false,
   "finishedAt": "2026-10-20T06:40:46.496Z"
  },
- "version": "v3",
+ "version": "v3.1",
  "truncation": {
   "files": 4127,
   "bars": 6728
  },
- "finishedAt": "2026-10-21T05:26:31.228Z",
+ "finishedAt": "2026-10-29T10:34:43.880Z",
  "dataEndDate": "2026-10-15",
  "universeCount": 5563,
  "targetCount": 5563,
@@ -159,7 +164,9 @@
    "maxDD": 1,
    "avgBearRet": 1,
    "bullNewHighRate": 1,
-   "roll5yP10": 1
+   "roll5yP10": 1,
+   "divYieldTTM": 0,
+   "divStreak": 0
   },
   "BOARDS": {
    "steady": [
@@ -173,10 +180,19 @@
    "cross": [
     "bullNewHighRate",
     "bearHigherLowRate"
+   ],
+   "dividend": [
+    "divYieldTTM",
+    "divStreak",
+    "maxDD"
    ]
   },
+  "BOARD_REQUIRE_ALL": {
+   "cross": true,
+   "dividend": true
+  },
   "ROLL_MONTHS": 60,
-  "VERSION": "v3",
+  "VERSION": "v3.1",
   "WINDOWS": [
    {
     "key": "10y",
@@ -208,7 +224,191 @@
     "board": "科创板",
     "fs": "m:1+t:23"
    }
-  ]
+  ],
+  "DIV": {
+   "ENABLED": true,
+   "DIR": "C:\\Users\\wuminqia\\Documents\\Amazon\\Kiro\\20261015_bull_bear_screen\\astock-perf\\screen\\out\\dividends",
+   "PRICE_DIR": "C:\\Users\\wuminqia\\Documents\\Amazon\\Kiro\\20261015_bull_bear_screen\\astock-perf\\screen\\out\\raw_monthly",
+   "STREAK_MIN_FOR_BOARD": 3,
+   "TTM_DAYS": 365,
+   "RECON_TOL_ABS": 0.1,
+   "RECON_TOL_REL": 0.002,
+   "RECON_DRIFT_MONTHS": 3,
+   "RECON_DRIFT_SHARE": 0.15,
+   "SYNTH_MAX_YIELD": 0.25,
+   "WINDOW_LOCAL_RECON": true,
+   "TR_GAP_MAX": 0.02,
+   "NULL_ON_HFQ_GAP": false,
+   "LAST_FY": null
+  }
+ },
+ "dividends": {
+  "lastFY": 2025,
+  "ttmRange": [
+   "2025-10-15",
+   "2026-10-15"
+  ],
+  "eligible": 4116,
+  "dataOk": 4116,
+  "dataMissing": 0,
+  "dataError": 0,
+  "pxOk": 4116,
+  "pxMissing": 0,
+  "rawCloseEndMissing": 0,
+  "anchorIpo": 3827,
+  "synthEvents": 159,
+  "stocksWithSynth": 71,
+  "synthCoincidentEvents": 23,
+  "synthFromWindowEvents": 16,
+  "synthDroppedEvents": 7474,
+  "synthRejectedSteps": 310,
+  "shiftedIntervals": 11295,
+  "unexplainedStocks": 849,
+  "driftStocks": 770,
+  "driftViews": {
+   "all": 770,
+   "10y": 100,
+   "5y": 52
+  },
+  "localReconOk": {
+   "all": 0,
+   "10y": 657,
+   "5y": 718
+  },
+  "localReconDrift": {
+   "all": 0,
+   "10y": 100,
+   "5y": 52
+  },
+  "hfqGapStocks": {
+   "all": 38,
+   "10y": 109,
+   "5y": 346
+  },
+  "trendMonthStocks": {
+   "all": 2,
+   "10y": 1,
+   "5y": 2
+  },
+  "pxMissingStocks": {
+   "all": 0,
+   "10y": 1,
+   "5y": 0
+  },
+  "trGap": {
+   "all": {
+    "n": 3346,
+    "median": 0.0017,
+    "p90": 0.0078,
+    "max": 0.0425,
+    "vsCagr": {
+     "n": 3346,
+     "median": 0.0017,
+     "p90": 0.0078,
+     "max": 0.0425
+    }
+   },
+   "10y": {
+    "n": 2448,
+    "median": 0.0026,
+    "p90": 0.0128,
+    "max": 0.0778
+   },
+   "5y": {
+    "n": 4064,
+    "median": 0.0036,
+    "p90": 0.018,
+    "max": 0.1315
+   }
+  },
+  "ttm": {
+   "n": 4116,
+   "medianAll": 0.0053,
+   "q1All": 0,
+   "q3All": 0.018,
+   "p90All": 0.0361,
+   "nPayers": 2792,
+   "medianPayers": 0.0121,
+   "max": 0.2095,
+   "maxCode": "603165"
+  },
+  "streakHist": {
+   "0": 1334,
+   "1-2": 351,
+   "3-4": 362,
+   "5-9": 1067,
+   "10-19": 837,
+   "20+": 165
+  },
+  "paying10of10": 948,
+  "payingGe8of10": 1488,
+  "listedBy2016": 2639,
+  "zeroDividendStocks": 33,
+  "payersWithPayout": 4063,
+  "payers": 4083,
+  "sanity600519": {
+   "divStreak": 25,
+   "dpsTTM": 51.9812,
+   "divYieldTTM": 0.0396,
+   "rawCloseEnd": 1312.97,
+   "nSynth": 2,
+   "synth": [
+    {
+     "ex": "2022-12-30",
+     "fy": 2022,
+     "cash": 21.9107,
+     "split": 1,
+     "src": "hfq",
+     "rep": null,
+     "eps": null,
+     "co": false
+    },
+    {
+     "ex": "2023-12-29",
+     "fy": 2023,
+     "cash": 19.106,
+     "split": 1,
+     "src": "hfq",
+     "rep": null,
+     "eps": null,
+     "co": false
+    }
+   ],
+   "unexplained": 0,
+   "fy2024Cash": 51.555,
+   "fy2024Eps": 68.64,
+   "fy2024Payout": 0.7511,
+   "payoutRatioAll": 0.64,
+   "cagr": 0.241719,
+   "cagrTR": 0.2511,
+   "cagrPx": 0.231,
+   "cagrHfqAligned": 0.2417,
+   "trFlag": null
+  },
+  "hasPayout": true,
+  "hasPayoutReason": "payers with payoutRatio 4063/4083 = 0.9951 ≥ 0.8; 600519 FY2024 payout 0.7511 ∈ [0.70, 0.80] → hasPayout true",
+  "hfqMethod": "additive-cash/multiplicative-split: hfq(t) = S(t)·raw(t) + D(t), anchored at listing; 600519: 299/302 month-end intervals within max(0.1, 0.2%·hfq), synth 2 (2022-12-30 cash 21.9107 fy2022) (2023-12-29 cash 19.106 fy2023), unexplained 0, drift false, anchor true; 601398: 241/241 month-end intervals within max(0.1, 0.2%·hfq), synth 0, unexplained 0, drift false, anchor true",
+  "config": {
+   "ENABLED": true,
+   "DIR": "C:\\Users\\wuminqia\\Documents\\Amazon\\Kiro\\20261015_bull_bear_screen\\astock-perf\\screen\\out\\dividends",
+   "PRICE_DIR": "C:\\Users\\wuminqia\\Documents\\Amazon\\Kiro\\20261015_bull_bear_screen\\astock-perf\\screen\\out\\raw_monthly",
+   "STREAK_MIN_FOR_BOARD": 3,
+   "TTM_DAYS": 365,
+   "RECON_TOL_ABS": 0.1,
+   "RECON_TOL_REL": 0.002,
+   "RECON_DRIFT_MONTHS": 3,
+   "RECON_DRIFT_SHARE": 0.15,
+   "SYNTH_MAX_YIELD": 0.25,
+   "WINDOW_LOCAL_RECON": true,
+   "TR_GAP_MAX": 0.02,
+   "NULL_ON_HFQ_GAP": false,
+   "LAST_FY": null
+  },
+  "boardSizes": {
+   "all": 2431,
+   "10y": 1411,
+   "5y": 2431
+  }
  },
  "sanity": [
   {
@@ -237,6 +437,19 @@
      "0.4": 1547,
      "0.5": 1536
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 25,
+    "divYieldTTM": 0.0396,
+    "divYears": 25,
+    "divN": 25,
+    "nSynth": 2,
+    "trFlag": null,
+    "cagrTR": 0.2511,
+    "divContrib": 0.0201,
+    "dividendRank": 10
    }
   },
   {
@@ -265,6 +478,19 @@
      "0.4": 35,
      "0.5": 35
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 23,
+    "divYieldTTM": 0.0338,
+    "divYears": 23,
+    "divN": 23,
+    "nSynth": 1,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 7
    }
   },
   {
@@ -293,6 +519,19 @@
      "0.4": 353,
      "0.5": 367
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 13,
+    "divYieldTTM": 0.0508,
+    "divYears": 13,
+    "divN": 13,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.2078,
+    "divContrib": 0.0409,
+    "dividendRank": 22
    }
   },
   {
@@ -321,6 +560,19 @@
      "0.4": 1328,
      "0.5": 1321
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 15,
+    "divYieldTTM": 0.0491,
+    "divYears": 26,
+    "divN": 30,
+    "nSynth": 0,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 466
    }
   },
   {
@@ -349,6 +601,19 @@
      "0.4": 1411,
      "0.5": 1473
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 26,
+    "divYieldTTM": 0.0043,
+    "divYears": 26,
+    "divN": 26,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.188,
+    "divContrib": 0.0048,
+    "dividendRank": 656
    }
   },
   {
@@ -377,6 +642,19 @@
      "0.4": 4069,
      "0.5": 4042
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 23,
+    "divYieldTTM": 0.013,
+    "divYears": 23,
+    "divN": 23,
+    "nSynth": 0,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 541
    }
   },
   {
@@ -405,6 +683,19 @@
      "0.4": 1013,
      "0.5": 1024
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 27,
+    "divYieldTTM": 0.0495,
+    "divYears": 32,
+    "divN": 33,
+    "nSynth": 3,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 114
    }
   },
   {
@@ -433,6 +724,19 @@
      "0.4": 126,
      "0.5": 134
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 8,
+    "divYieldTTM": 0.0756,
+    "divYears": 27,
+    "divN": 30,
+    "nSynth": 0,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 171
    }
   },
   {
@@ -461,6 +765,19 @@
      "0.4": 1203,
      "0.5": 1195
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 24,
+    "divYieldTTM": 0.0473,
+    "divYears": 24,
+    "divN": 24,
+    "nSynth": 0,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 122
    }
   },
   {
@@ -489,6 +806,19 @@
      "0.4": 1986,
      "0.5": 1969
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 26,
+    "divYieldTTM": 0.0317,
+    "divYears": 25,
+    "divN": 25,
+    "nSynth": 0,
+    "trFlag": "recon_drift",
+    "cagrTR": null,
+    "divContrib": null,
+    "dividendRank": 479
    }
   },
   {
@@ -517,6 +847,19 @@
      "0.4": 3848,
      "0.5": 3832
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 17,
+    "divYieldTTM": 0.0231,
+    "divYears": 17,
+    "divN": 17,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.1456,
+    "divContrib": 0.0074,
+    "dividendRank": 691
    }
   },
   {
@@ -545,6 +888,19 @@
      "0.4": 3531,
      "0.5": 3316
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 8,
+    "divYieldTTM": 0.0254,
+    "divYears": 8,
+    "divN": 8,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.1315,
+    "divContrib": 0.0172,
+    "dividendRank": 422
    }
   },
   {
@@ -573,6 +929,19 @@
      "0.4": 2416,
      "0.5": 2865
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 4,
+    "divYieldTTM": 0.03,
+    "divYears": 7,
+    "divN": 8,
+    "nSynth": 2,
+    "trFlag": null,
+    "cagrTR": 0.3839,
+    "divContrib": 0.0137,
+    "dividendRank": 592
    }
   },
   {
@@ -601,6 +970,19 @@
      "0.4": 2707,
      "0.5": 2549
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 17,
+    "divYieldTTM": 0.0055,
+    "divYears": 16,
+    "divN": 16,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.2163,
+    "divContrib": 0.0035,
+    "dividendRank": 1545
    }
   },
   {
@@ -629,6 +1011,19 @@
      "0.4": 1840,
      "0.5": 1792
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 16,
+    "divYieldTTM": 0.0101,
+    "divYears": 16,
+    "divN": 16,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.1756,
+    "divContrib": 0.0108,
+    "dividendRank": 291
    }
   },
   {
@@ -657,6 +1052,19 @@
      "0.4": 558,
      "0.5": 419
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 3,
+    "divYieldTTM": 0.0008,
+    "divYears": 3,
+    "divN": 7,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.266,
+    "divContrib": 0.001,
+    "dividendRank": 2072
    }
   },
   {
@@ -685,6 +1093,19 @@
      "0.4": 2925,
      "0.5": 2703
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 7,
+    "divYieldTTM": 0.0054,
+    "divYears": 7,
+    "divN": 7,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.0953,
+    "divContrib": 0.003,
+    "dividendRank": 1193
    }
   },
   {
@@ -713,6 +1134,18 @@
      "0.4": 111,
      "0.5": 113
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 0,
+    "divYieldTTM": 0,
+    "divYears": 0,
+    "divN": 6,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.0376,
+    "divContrib": 0
    }
   },
   {
@@ -741,6 +1174,19 @@
      "0.4": 462,
      "0.5": 121
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 7,
+    "divYieldTTM": 0.0036,
+    "divYears": 7,
+    "divN": 7,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.1186,
+    "divContrib": 0.0051,
+    "dividendRank": 1154
    }
   },
   {
@@ -769,6 +1215,19 @@
      "0.4": 3645,
      "0.5": 3425
     }
+   },
+   "div": {
+    "data": "ok",
+    "px": "ok",
+    "divStreak": 7,
+    "divYieldTTM": 0.0353,
+    "divYears": 7,
+    "divN": 7,
+    "nSynth": 0,
+    "trFlag": null,
+    "cagrTR": 0.0474,
+    "divContrib": 0.0252,
+    "dividendRank": 854
    }
   }
  ]

@@ -18,6 +18,7 @@
   .seg button.on { background: var(--blue); color: #fff; }
   .boardSeg { display: inline-flex; gap: 10px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; padding: 5px 10px; }
   input[type=text] { padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; width: 520px; max-width: 100%; font-size: 13px; }
+  input[type=number] { padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; color: var(--text); }
   label.chk { display: inline-flex; align-items: center; gap: 4px; color: var(--axis); }
   .card { background: #fff; border: 1px solid var(--grid); border-radius: 8px; margin: 0 20px 14px; padding: 12px; }
   .card h3 { margin: 0 0 8px; font-size: 14px; color: #111827; }
@@ -69,6 +70,9 @@
   <input type="text" id="filter" autocomplete="off" spellcheck="false" placeholder="筛选：代码 / 名称 / 行业 — 输入 6 位代码回车打开个股看板（ETF / LOF 亦可）" aria-label="筛选；输入 6 位代码回车打开个股看板">
   <label class="chk"><input type="checkbox" id="onlyTop"> 只看综合榜 Top 50</label>
   <label class="chk"><input type="checkbox" id="onlyPareto"> 只看 Pareto 前沿</label>
+  <label class="chk"><input type="checkbox" id="onlyDiv"> 只看红利榜 Top 50</label>
+  <label class="chk" title="只显示自 FY(数据截止年 − 1) 起连续分红年数 ≥ n 的个股；留空 = 不筛">连续分红 ≥ <input type="number" id="minStreak" min="0" max="40" step="1" style="width:56px" placeholder="—" aria-label="连续分红年数下限"> 年</label>
+  <label class="chk"><input type="checkbox" id="showDiv" checked> 显示分红列</label>
   <label class="chk"><input type="checkbox" id="logX"> 散点 x 轴 log(1+年化)</label>
   <span class="sub" id="countLine"></span>
 </div>
@@ -83,7 +87,7 @@
   <div class="table-wrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
   <div class="more"><button id="showAll" type="button" hidden></button></div>
 </section>
-<footer>排名、百分位、综合分在全部板块（沪深主板 + 创业板 + 科创板）的入选个股内统一计算；板块筛选只影响显示的行，不重新排名。综合分 = 年化、Calmar、最大回撤、熊市均跌、牛市新高率、滚动5年P10 六项百分位等权平均（同窗口榜在各窗口入选集合内算百分位；近5年窗口滚动5年为空、按其余 5 项）；熊市均跌 = 合格熊市（已完成 + 实现跌幅≥阈值的首段/进行中）跌幅的均值：已完成 / 进行中熊市取起点（枢轴高点）→最低点跌幅，首段（截断）熊市按段内最高点→最低点跌幅计（v2.1），无合格熊市取最大回撤（*）；牛市均涨只统计已完成牛市；新高率/底部抬高率样本 &lt;2 为空；后复权；上市至今 = 上市首日至数据截止日，近10年 / 近5年 = 2016-10-15 / 2021-10-15 至数据截止日（科创板 2019-07-22 开板，不在近10年窗口）。</footer>
+<footer>排名、百分位、综合分在全部板块（沪深主板 + 创业板 + 科创板）的入选个股内统一计算；板块筛选只影响显示的行，不重新排名。综合分 = 年化、Calmar、最大回撤、熊市均跌、牛市新高率、滚动5年P10 六项百分位等权平均（同窗口榜在各窗口入选集合内算百分位；近5年窗口滚动5年为空、按其余 5 项）；熊市均跌 = 合格熊市（已完成 + 实现跌幅≥阈值的首段/进行中）跌幅的均值：已完成 / 进行中熊市取起点（枢轴高点）→最低点跌幅，首段（截断）熊市按段内最高点→最低点跌幅计（v2.1），无合格熊市取最大回撤（*）；牛市均涨只统计已完成牛市；新高率/底部抬高率样本 &lt;2 为空；后复权；上市至今 = 上市首日至数据截止日，近10年 / 近5年 = 2016-10-15 / 2021-10-15 至数据截止日（科创板 2019-07-22 开板，不在近10年窗口）。<br>分红列（v3.1，数据：东方财富数据中心分红送转明细 + 腾讯不复权月收盘，税前）：股息率(近12月) = 数据截止日前 12 个月内除息的每股税前现金 ÷ 数据截止日不复权收盘；分红年数 x/N = 区间内有现金分红的会计年度数 / 区间会计年度数（区间会计年度随区间切换：上市至今 自上市年度起至 FY2025，近10年 FY2016–2025，近5年 FY2021–2025）；连续分红 = 自 FY2025 向前连续有现金分红的年度数（不受区间限制）；平均股息率 = 区间内各年度（每股现金 ÷ 除息月前一月末不复权收盘）之和 ÷ N；派息率 = Σ现金 ÷ Σ年报 EPS（有年报 EPS 的分红年度）；分红贡献 = 分红再投资年化 − 纯价格年化（不复权月收盘，分红在除息后首个月末按收盘再投资；送转 / 配股与后复权序列对不上的个股为空）；红利# = 红利榜名次 = 股息率(近12月)、连续分红、最大回撤 三项百分位均值，门槛 连续分红 ≥ 3 年（三阈值相同）；分红数据缺失的行分红列显示 —。</footer>
 <script>
 (function () {
   'use strict';
@@ -145,7 +149,8 @@
   const cls = (x) => (x > 0 ? 'up' : x < 0 ? 'down' : 'flat');
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const bdTag = (b) => '<span class="bd' + (b === '创业板' ? ' bd-cyb' : b === '科创板' ? ' bd-kcb' : '') + '">' + esc(b) + '</span>';
-  const state = { win: 'all', th: '0.3', boards: new Set(BOARDS), sortKey: 'rank', sortDir: 1, filter: '', onlyTop: false, onlyPareto: false, logX: false };
+  const PP = (x) => { if (x == null || !isFinite(x)) return '—'; let v = (x * 100).toFixed(1); if (parseFloat(v) === 0) v = '0.0'; return (parseFloat(v) > 0 ? '+' : '') + v + 'pp'; }; // 百分点差（分红贡献）
+  const state = { win: 'all', th: '0.3', boards: new Set(BOARDS), sortKey: 'rank', sortDir: 1, filter: '', onlyTop: false, onlyPareto: false, logX: false, onlyDiv: false, minStreak: null, showDiv: true }; // onlyDiv = 只看红利榜 Top 50；minStreak = 连续分红 ≥ n（null = 不筛）；showDiv = 显示「分红」列组
   const rows = () => VIEWS[state.win] || [];
   const boardRows = () => rows().filter((r) => state.boards.has(r.board)); // 板块筛选只影响显示，排名 / 百分位为全部板块内的全局值
   const boardList = () => BOARDS.filter((b) => state.boards.has(b));
@@ -182,15 +187,26 @@
     col('steadyRank', '稳健#', (r, T) => r.th[T].steadyRank, N, { dep: true }),
     col('attackRank', '进攻#', (r, T) => r.th[T].attackRank, N, { dep: true }),
     col('crossRank', '穿越#', (r, T) => r.th[T].crossRank, N, { dep: true }),
+    // 「分红」列组（v3.1，grp 'div'；#showDiv 关掉时隐藏）：取值随区间切换（分红年数 x/N 的 N = 区间会计年度数），与阈值无关；该行分红数据缺失（divMiss = 1）时一律显示 —
+    col('divYieldTTM', '股息率(近12月)', (r) => r.divYieldTTM, dm((v) => PN(v, 2)), { grp: 'div' }),
+    col('divYears', '分红年数', (r) => r.divYears, dm((v, r) => (v == null ? '—' : v + '/' + r.divN)), { grp: 'div' }),
+    col('divStreak', '连续分红', (r) => r.divStreak, dm(N), { grp: 'div' }),
+    col('avgDivYield', '平均股息率', (r) => r.avgDivYield, dm((v) => PN(v, 2)), { grp: 'div' }),
+    col('payoutRatio', '派息率', (r) => r.payoutRatio, dm((v) => PN(v, 0)), { grp: 'div', need: 'payoutRatio' }), // 仅当数据文件含 payoutRatio（META.hasPayout）时显示
+    col('divContrib', '分红贡献', (r) => r.divContrib, dm((v) => (v == null ? '—' : '<span class="' + cls(v) + '" title="分红再投资年化 − 纯价格年化">' + PP(v) + '</span>')), { grp: 'div' }),
+    col('dividendRank', '红利#', (r) => r.dividendRank, dm(N), { grp: 'div' }),
     col('pareto', 'Pareto', (r) => (r.pareto ? 1 : 0), (v) => (v ? '<span class="pareto">✓</span>' : '')),
   ];
+  function dm(f) { return (v, r, T) => (r.divMiss ? '—' : f(v, r, T)); } // 分红列包装：数据缺失行显示 —
 
-  const activeCols = () => COLS.filter((c) => !c.win || state.win !== 'all');
+  const activeCols = () => COLS.filter((c) => (!c.win || state.win !== 'all') && (c.grp !== 'div' || state.showDiv) && (!c.need || KEYS.base.includes(c.need)));
   function visibleRows() {
     const T = state.th, q = state.filter.trim().toLowerCase();
     let list = boardRows().filter((r) => !q || r.code.indexOf(q) >= 0 || r.name.toLowerCase().indexOf(q) >= 0 || (r.industry || '').toLowerCase().indexOf(q) >= 0);
     if (state.onlyTop) list = list.filter((r) => r.th[T].rank != null && r.th[T].rank <= 50);
     if (state.onlyPareto) list = list.filter((r) => r.pareto);
+    if (state.onlyDiv) list = list.filter((r) => r.dividendRank != null && r.dividendRank <= 50);
+    if (state.minStreak != null) list = list.filter((r) => r.divStreak != null && r.divStreak >= state.minStreak);
     const c = COLS.find((x) => x.key === state.sortKey) || COLS[0];
     list.sort((a, b) => {
       const va = c.get(a, T), vb = c.get(b, T);
@@ -282,7 +298,7 @@
       const p = nearest(ev);
       if (!p) { tip.style.display = 'none'; canvas.style.cursor = ''; return; }
       const r = p.row, T = state.th;
-      tip.innerHTML = '<b>' + esc(r.name) + '</b> ' + esc(r.code) + ' · ' + esc(r.board) + (r.th[T].rank != null ? ' · 综合# ' + r.th[T].rank : '') + '<br>年化 ' + P(r.cagr) + ' · 最大回撤 ' + P(r.maxDD) + '<br>熊市均跌 ' + P(r.th[T].avgBearRet) + (r.th[T].bearSrc === 1 ? '*' : '') + ' · 牛/熊 ' + r.th[T].nBull + '/' + r.th[T].nBear + '(' + r.th[T].nBQ + ')';
+      tip.innerHTML = '<b>' + esc(r.name) + '</b> ' + esc(r.code) + ' · ' + esc(r.board) + (r.th[T].rank != null ? ' · 综合# ' + r.th[T].rank : '') + '<br>年化 ' + P(r.cagr) + ' · 最大回撤 ' + P(r.maxDD) + '<br>熊市均跌 ' + P(r.th[T].avgBearRet) + (r.th[T].bearSrc === 1 ? '*' : '') + ' · 牛/熊 ' + r.th[T].nBull + '/' + r.th[T].nBear + '(' + r.th[T].nBQ + ')' + (r.divMiss || r.divYieldTTM === undefined ? '' : ' · 股息率TTM ' + PN(r.divYieldTTM, 2));
       tip.style.display = 'block'; canvas.style.cursor = 'pointer'; move(ev);
     });
     canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; canvas.style.cursor = ''; });
@@ -311,6 +327,9 @@
     $('filter').addEventListener('keydown', (e) => { if (e.key !== 'Enter') return; if (e.isComposing || e.keyCode === 229) return; clearTimeout(ft); state.filter = e.target.value; renderTable(); const url = jumpTarget(e.target.value); if (url) location.href = url; });
     $('onlyTop').addEventListener('change', (e) => { state.onlyTop = e.target.checked; renderTable(); });
     $('onlyPareto').addEventListener('change', (e) => { state.onlyPareto = e.target.checked; renderTable(); });
+    $('onlyDiv').addEventListener('change', (e) => { state.onlyDiv = e.target.checked; if (state.onlyDiv) { state.sortKey = 'dividendRank'; state.sortDir = 1; } renderTable(); }); // 勾上时同时按 红利# 升序
+    let mt = null; $('minStreak').addEventListener('input', (e) => { clearTimeout(mt); mt = setTimeout(() => { const s = String(e.target.value).trim(); state.minStreak = s === '' ? null : Math.max(0, parseInt(s, 10) || 0); renderTable(); }, 120); });
+    $('showDiv').addEventListener('change', (e) => { state.showDiv = e.target.checked; renderTable(); });
     $('logX').addEventListener('change', (e) => { state.logX = e.target.checked; renderScatter(); });
     let rt = null; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderScatter, 160); });
     const wrap = tableWrap();

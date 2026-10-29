@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 /* 读取 screen/out/results.json + screen/out/benchmarks.json + screen/run_meta.json，生成：
- *   screen/report.md —— 中文报告 v3：版本变更说明 / 概览 / 板块构成 / 各阈值综合榜 Top50 + 稳健·进攻·穿越榜 Top20 + 牛熊轮数分布 /
- *                       近10年·近5年同窗口榜 / Pareto 前沿 / 跨阈值交集 / 合理性校验（含结构观察）/ 口径与局限
+ *   screen/report.md —— 中文报告 v3.1：版本变更说明 / 概览 / 板块构成 / 各阈值综合榜 Top50 + 稳健·进攻·穿越榜 Top20 + 牛熊轮数分布 /
+ *                       近10年·近5年同窗口榜 / Pareto 前沿 / 跨阈值交集 / 合理性校验（含结构观察）/ 分红与股息（v3.1：口径、全市场分布、红利榜、综合榜的分红贡献、后复权口径差异）/ 口径与局限
  *   screen.html（仓库根目录）—— 零依赖页面壳（< 60 KB）：区间切换（上市至今 / 近10年 / 近5年）、阈值切换、板块多选、列头排序、文本筛选、CAGR×MaxDD 散点、每行链接看板；
+ *                       v3.1 增加「分红」列组（股息率(近12月) / 分红年数 x/N / 连续分红 / 平均股息率 / 派息率 / 分红贡献 / 红利#）与 只看红利榜 Top 50 / 连续分红 ≥ n 年 / 显示分红列 三个控件；
  *                       数据在 screen/data/*.js（13 个纯 JS 赋值文件，<script> 动态注入加载，file:// 可用）：meta.js（META / KEYS / 行业字典）、all.js / 10y.js / 5y.js（各区间基础字段，
- *                       按入选个股下标对齐，不在窗口的为 null）、<区间>_th30|40|50.js（各阈值 18 项指标）；首屏只加载 meta.js + all.js + all_th30.js，其余切换时按需加载
- *   版本号取 run_meta.version（tools/screen_all.js CONFIG.VERSION）；v3 = 股票池扩为 沪深主板 + 创业板 + 科创板，指标口径与 v2.1 相同
+ *                       按入选个股下标对齐，不在窗口的为 null；v3.1 在 KEYS.base 末尾追加分红键）、<区间>_th30|40|50.js（各阈值 18 项指标，v3.1 未改动、与 v3 逐字节相同）；首屏只加载 meta.js + all.js + all_th30.js，其余切换时按需加载
+ *   版本号取 run_meta.version（tools/screen_all.js CONFIG.VERSION）；v3 = 股票池扩为 沪深主板 + 创业板 + 科创板，指标口径与 v2.1 相同；v3.1 = 新增分红 / 股息率指标与红利榜（run_meta.dividends），现有指标与名次不变
+ *   run_meta 无 dividends（或 --no-dividends 运行）时不输出分红章节、不追加分红键，产出与 v3 相同
  * 用法（仓库根目录）：node tools/screen_report.js [--source eastmoney|tencent]
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const ROOT = path.join(__dirname, '..');
 const OUT = path.join(ROOT, 'screen', 'out');   // results.json / benchmarks.json（工作文件，不入库）
@@ -115,6 +118,22 @@ const INTERIM_NOTE = INTERIM_BOARDS.length ? INTERIM_BOARDS.join(' / ') + ' 的�
 // screen.html 横幅用（面向读者，一句话，不含命令 / 文件名）
 const INTERIM_NOTE_HTML = INTERIM_BOARDS.length ? INTERIM_BOARDS.join(' / ') + ' 共 ' + INTERIM_COUNT + ' 只的「行业」暂缺（股票列表接口当日不可用，上市日期取 K 线首根）；入选、指标与排名以 K 线为准，不受影响。' : null;
 
+// ------------------------------------------------------------------ 分红与股息（v3.1；run_meta.dividends 存在且未被 --no-dividends 关闭时启用，否则产出与 v3 相同）
+const DIV = meta.dividends && meta.dividendsEnabled !== false ? meta.dividends : null;
+const HAS_PAYOUT = !!(DIV && DIV.hasPayout);
+const DIV_CFG = (DIV && DIV.config) || {};
+const STREAK_MIN = DIV_CFG.STREAK_MIN_FOR_BOARD != null ? DIV_CFG.STREAK_MIN_FOR_BOARD : 3;
+const LAST_FY = DIV ? DIV.lastFY : null;
+const TTM_FROM = DIV && DIV.ttmRange ? DIV.ttmRange[0] : null;
+const dv = (v) => (v && v.div && v.div.data === 'ok' ? v.div : null); // 视图记录（全史行 r / 窗口记录 r.windows[key]）的分红指标；数据缺失 / 异常 → null
+const PP = (x) => { if (x == null || !isFinite(x)) return '—'; let v = (x * 100).toFixed(1); if (parseFloat(v) === 0) v = '0.0'; return (parseFloat(v) > 0 ? '+' : '') + v + 'pp'; }; // 百分点差（分红贡献 / 年化差值，带正号）
+const PPA = (x) => (x == null || !isFinite(x) ? '—' : (x * 100).toFixed(1) + 'pp'); // 百分点（绝对值统计，无正号）
+const yrs = (d) => (d.divYears == null ? '—' : d.divYears + '/' + d.divN); // 分红年数 x/N
+const ppCell = (d, x) => (x != null ? PP(x) : d.trFlag ? '—（' + d.trFlag + '）' : '—'); // 再投资类指标为空时在该格给出原因标记（recon_drift / px_missing）
+const quantile = (s, q) => { const m = s.length; if (!m) return null; const pos = q * (m - 1), lo = Math.floor(pos), hi = Math.min(m - 1, lo + 1), f = pos - lo; return s[lo] + (s[hi] - s[lo]) * f; }; // 与 screen_all.js 同一插值法
+const median = (arr) => (arr.length ? quantile(arr.slice().sort((a, b) => a - b), 0.5) : null);
+const fyRange = (W) => (W ? 'FY' + W.start.slice(0, 4) + '–' + LAST_FY : '上市年度–FY' + LAST_FY);
+
 // ------------------------------------------------------------------ report.md
 const L = [];
 L.push('# A 股全市场（沪深主板 + 创业板 + 科创板）「牛熊逻辑」筛选报告 ' + VER + (IS_TX ? '（数据源：腾讯 hfq 回退）' : ''));
@@ -123,7 +142,7 @@ L.push('> **' + SOURCE_NOTE + '**');
 L.push('>');
 L.push('> 生成时间：' + new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC · 数据截止：**' + (DATA_END || '—') + '**（' + DATA_END_NOTE + '）· 数据源：' + SOURCE_LABEL + ' · 股票池：沪深主板 + 创业板 + 科创板（除 ST / 退、除北交所、上市满 5 年）' + (uf && uf.fetchedAt ? '，clist 拉取于 ' + uf.fetchedAt.slice(0, 10) : '') + ' · 引擎：astock-perf `app.js analyze()` · 区间：上市首日 → 数据截止日（第 3–5 节）/ 固定起点同窗口（第 6–7 节）· 牛熊划分依据 auto（≥6 年月收盘 / ≥2 年周收盘）');
 L.push('>');
-L.push('> 版本变更见第 0 节（v3：股票池扩为全市场，指标口径与 v2.1 相同）。排名 / 百分位 / 综合分在全部板块的入选个股内统一计算，「板块」列只是标签。全部数值为比率（如 +24.2% = 年化 24.2%）。每行「看板」链接打开 astock-perf 页面核对（相对路径 `' + DASH_MD + '`，需联网拉取行情' + (IS_TX ? '；看板为东财口径，数字略有差异' : '') + '）。');
+L.push('> 版本变更见第 0 节（' + (DIV ? 'v3.1：新增分红与股息指标与红利榜，现有指标与名次不变；' : '') + 'v3：股票池扩为全市场，指标口径与 v2.1 相同）。排名 / 百分位 / 综合分在全部板块的入选个股内统一计算，「板块」列只是标签。全部数值为比率（如 +24.2% = 年化 24.2%）。每行「看板」链接打开 astock-perf 页面核对（相对路径 `' + DASH_MD + '`，需联网拉取行情' + (IS_TX ? '；看板为东财口径，数字略有差异' : '') + '）。');
 L.push('');
 
 // ---- 0. 版本变更说明
@@ -135,7 +154,18 @@ const bc = meta.boardCounts || {};
 const bcGet = (b, k) => (bc[b] && bc[b][k] != null ? bc[b][k] : boardCount(k === 'universe' ? results : k === 'eligible' ? elig : wElig(WINDOWS.find((W) => 'w' + W.key === k) || WINDOWS[0]), b));
 L.push('## 0. 版本变更说明');
 L.push('');
-L.push('### v3 变更说明（' + (meta.finishedAt ? meta.finishedAt.slice(0, 10) : '') + '）');
+if (DIV) {
+  const dvw = (k) => (DIV.driftViews && DIV.driftViews[k] != null ? DIV.driftViews[k] : '—');
+  L.push('### v3.1 变更说明（' + (meta.finishedAt ? meta.finishedAt.slice(0, 10) : '') + '）');
+  L.push('');
+  L.push('1. **新增分红与股息指标**（「分红与股息」一节、`metrics_*.csv` 在「数据源」之后追加的列、screen.html 的「分红」列组）：每股分红TTM、股息率(近12月)、连续分红年数、分红年数 x/N、平均股息率、' + (HAS_PAYOUT ? '派息率、' : '') + '分红增长、年化(分红再投资)、纯价格年化、分红贡献。数据来源：东方财富数据中心分红送转明细（`RPT_SHAREBONUS_DET`，税前、每 10 股口径，只取「实施」且除息日 ≤ 数据截止日的记录）+ 腾讯财经 `web.ifzq.gtimg.cn` 不复权月收盘与数据截止日收盘（`tools/fetch_dividends.js --pass dividends | prices`，缓存 `screen/out/dividends/`、`screen/out/raw_monthly/`）。会计年度按报告期归属，最后一个完整会计年度 FY' + LAST_FY + '；近12月 = ' + TTM_FROM + ' → ' + DATA_END + '。');
+  L.push('2. **新增红利榜**：股息率(近12月)、连续分红年数、最大回撤 三项百分位等权平均（三项均需非空），门槛为分红数据完整且连续分红 ≥ ' + STREAK_MIN + ' 年；每个区间一套名次（上市至今 ' + N(DIV.boardSizes && DIV.boardSizes.all) + ' 只入围' + WINDOWS.map((W) => '，' + W.label + ' ' + N(DIV.boardSizes && DIV.boardSizes[W.key]) + ' 只').join('') + '），三个阈值下名次相同。');
+  L.push('3. **现有指标、综合分权重（新增 `divYieldTTM` / `divStreak` 两项权重 0，`compositeN` 只数正权重项）、名次逐位不变**：由 `tools/screen_verify.js --baseline <v3 产出目录>` 校验 —— 5 个 CSV 的旧列逐行逐格相同、9 个 `screen/data/*_th*.js` 逐字节相同、`all.js` / `10y.js` / `5y.js` 旧键取值相同；`--no-dividends` 运行可复现 v3 产出。');
+  L.push('4. **数据缺口（实测）**：分红数据缺失 ' + N(DIV.dataMissing) + ' 只、不复权收盘缺失 ' + N(DIV.pxMissing) + ' 只；数据中心明细漏掉的现金分红由后复权序列对账补齐 ' + N(DIV.synthEvents) + ' 笔（' + N(DIV.stocksWithSynth) + ' 只，如贵州茅台 2022-12 / 2023-12 两次特别分红）；送转 / 配股与后复权序列不符（`recon_drift`）的个股上市至今 ' + N(DIV.driftStocks) + ' 只，其年化(分红再投资) / 纯价格年化 / 分红贡献 为空，股息率与分红年数仍按明细计算；窗口内局部对账后近10年 / 近5年 仍为空的分别 ' + dvw('10y') + ' / ' + dvw('5y') + ' 只。');
+  L.push('5. **新增命令行参数**：`tools/screen_all.js --today YYYY-MM-DD`（固定 clist f26 预剔除的判定日，复算时复现早先一次运行的股票池）、`--no-dividends`（关闭分红指标）；拉数脚本 `tools/fetch_dividends.js`，看门狗 `tools/fetch_watchdog.js --job dividends | prices`。详见 `screen/README.md`「分红与股息指标」。');
+  L.push('');
+}
+L.push('### v3 变更说明（2026-10-21）');
 L.push('');
 // 本次各板块行的实际来源（与第 1 节「股票池行来源」一致）：全部来自 clist 时给出拉取日期；有临时行时点明
 const PROV_SRC_NOTE = PROV ? (INTERIM_BOARDS.length ? '本次 ' + INTERIM_BOARDS.join(' / ') + ' 行为临时行（来自代码表，无 clist 上市日 / 行业 / 总市值，见第 1 节「股票池行来源」）' : '本次各板块行均来自 clist（' + PROV_DESC + '）') : '';
@@ -441,7 +471,108 @@ L.push('');
 L.push('解读：综合分 6 项里有 4 项（最大回撤、Calmar、熊市均跌、滚动 5 年 P10）对历史长度敏感 —— 上市 5–10 年的个股没有经历 2008 / 2015 级别的系统性回撤，最大回撤与熊市均跌天然更浅，因此新股在全史榜中的占比高于其在入选集合中的比例；科创板（最长约 7 年历史）与 2015 年后上市的创业板个股尤其如此。同窗口榜（第 6–7 节）把所有个股放在同一时间窗内比较，是消除这一历史长度差异的对照视角；近10年窗口按定义不含科创板。综合分不含「当前回撤 / 进行中阶段」，榜首可能正处于深度回撤中（见「当前回撤」列）。如需偏向长历史个股，可在 `tools/screen_all.js` 顶部 `CONFIG` 调高 `MIN_YEARS`（如 10）或调整 `COMPOSITE_WEIGHTS` 后 `--compute-only` 重算，一两分钟即可。');
 L.push('');
 
-// ---- 11. 口径与局限
+// ---- 11. 分红与股息（v3.1）
+if (DIV) {
+  const T = '0.3';
+  const W10 = WINDOWS[0];
+  const divRows = elig.map((r) => dv(r)).filter(Boolean);
+  L.push('## ' + sec++ + '. 分红与股息（v3.1 新增）');
+  L.push('');
+  L.push('现有指标与名次不受本节影响（综合分新增两项权重 0）。本节数值来自东方财富数据中心分红送转明细与腾讯不复权行情，按下列口径计算；拆分 / 配股与后复权序列不符的个股，再投资类指标置空并标 `recon_drift`。');
+  L.push('');
+  L.push('### 口径');
+  L.push('');
+  L.push('- **数据**：东方财富数据中心 `RPT_SHAREBONUS_DET`（分红送转明细，每 10 股税前）—— 只取 `ASSIGN_PROGRESS` 含「实施」且除息日 ≤ 数据截止日 ' + DATA_END + ' 的记录；每股税前现金 = `PRETAX_BONUS_RMB` / 10，送转因子 = 1 + (`BONUS_IT_RATIO` ?? `BONUS_RATIO` + `IT_RATIO`) / 10，送转只影响拆分因子，不计入分红。价格为腾讯 `web.ifzq.gtimg.cn` 不复权月收盘与数据截止日收盘。');
+  L.push('- **明细补齐**：东财后复权序列满足 hfq(t) = S(t)·raw(t) + D(t)（现金加性、送转乘性，锚定上市首日），逐月末对账；明细缺一笔现金时序列出现干净台阶，按台阶补一笔现金事件（计入所有指标，`metrics_*.csv`「补齐事件数」列）；本次补齐 ' + N(DIV.synthEvents) + ' 笔 / ' + N(DIV.stocksWithSynth) + ' 只。残差无法解释的月份过多（近 12 个月末 ≥ ' + N(DIV_CFG.RECON_DRIFT_MONTHS) + ' 个或占比 > ' + PN(DIV_CFG.RECON_DRIFT_SHARE, 0) + '）→ `recon_drift`，再投资类指标置空。');
+  L.push('- **会计年度**按报告期 `REPORT_DATE` 归属（年报 12-31 与中期 / 季度报各归其年度）；无报告期的记录与补齐事件按除息月归属（1–8 月 → 上一年度，9–12 月 → 当年）。最后一个完整会计年度 LAST_FY = 数据截止年 − 1 = FY' + LAST_FY + '。');
+  L.push('- **股息率(近12月)** = (' + TTM_FROM + ', ' + DATA_END + '] 内除息的每股税前现金之和（按其后送转折算到当前股本）÷ 数据截止日不复权收盘。');
+  L.push('- **分红年数 x/N** = 区间内有现金分红的会计年度数 / 区间会计年度数：上市至今 N = 上市年度 → FY' + LAST_FY + WINDOWS.map((W) => '；' + W.label + ' N = ' + (LAST_FY - +W.start.slice(0, 4) + 1) + '（' + fyRange(W) + '）').join('') + '。**连续分红** = 自 FY' + LAST_FY + ' 起向前连续有现金分红的年度数（不受区间限制，可大于 N）。');
+  L.push('- **平均股息率** = 区间内各会计年度股息率之和 ÷ N，年度股息率 = 该年度每股现金 ÷ 除息月前一月末不复权收盘（无分红的年度计 0）。');
+  L.push(HAS_PAYOUT
+    ? '- **派息率** = Σ 现金 ÷ Σ 年报基本 EPS，对区间内有现金分红且有年报 EPS（`BASIC_EPS` > 0）的会计年度求和（现金加权）；明细缺 EPS 的年度不计。'
+    : '- **派息率**：本次不输出（开关 `hasPayout` 为 false：' + (DIV.hasPayoutReason || '派息率覆盖率或 600519 FY2024 校验未通过') + '）。');
+  L.push('- **年化(分红再投资)**：以不复权月收盘为价格序列，起点 = 上市首日收盘（同窗口榜为窗口起点前最后一个月末），每笔现金在除息后首个月末按当日收盘买回同一只股票，送转按因子调整份额；终点 = 数据截止日收盘。**纯价格年化** = 同一序列只计送转、不计现金；**分红贡献** = 年化(分红再投资) − 纯价格年化（百分点 pp）。**年化(后复权,同起点)** = 东财后复权序列在同样两个日期的年化（上市至今即现有「年化」列）；|年化(分红再投资) − 年化(后复权,同起点)| > ' + PN(DIV_CFG.TR_GAP_MAX, 0) + ' 标 `hfq_gap`，见本节末。');
+  L.push('- **红利榜** = 股息率(近12月)、连续分红年数、最大回撤 三项百分位等权平均（在各区间入选集合内算百分位，三项均需非空），门槛：分红数据完整且连续分红 ≥ ' + STREAK_MIN + ' 年；三个阈值下名次相同。CSV 列「红利分」「红利排名」，screen.html 列「红利#」。');
+  L.push('- **零分红 / 缺失**：从未分红的个股明细为空表（如中芯国际），股息率 0、分红年数 0/N、连续分红 0、不入红利榜；分红明细或不复权收盘缺失的个股相应指标为空（表中「数据缺失」/ —）。');
+  L.push('');
+  L.push('### 全市场分布');
+  L.push('');
+  {
+    const ttmAll = divRows.filter((d) => d.px === 'ok' && d.divYieldTTM != null).map((d) => d.divYieldTTM).sort((a, b) => a - b);
+    const ttmPay = ttmAll.filter((x) => x > 0);
+    const qRow = (s) => (s.length ? [0.5, 0.25, 0.75, 0.9].map((q) => PN(quantile(s, q), 2)).join(' · ') + ' · ' + PN(s[s.length - 1], 2) : '—');
+    const maxR = elig.filter((r) => dv(r) && dv(r).divYieldTTM != null).sort((a, b) => dv(b).divYieldTTM - dv(a).divYieldTTM)[0];
+    const sBucket = (s) => (s == null || s <= 0 ? '0' : s <= 2 ? '1–2' : s <= 4 ? '3–4' : s <= 9 ? '5–9' : s <= 19 ? '10–19' : '20+');
+    const sKeys = ['0', '1–2', '3–4', '5–9', '10–19', '20+'];
+    const hist = {}; for (const k of sKeys) hist[k] = 0; for (const d of divRows) hist[sBucket(d.divStreak)]++;
+    const zero = divRows.filter((d) => d.divYears === 0 && d.divStreak === 0 && !(d.divYieldTTM > 0)).length;
+    const lb = DIV.listedBy2016 || 0;
+    L.push(table(['项目', '数值'], [
+      ['入选个股', elig.length + ' 只（' + boardSplit(elig) + '）'],
+      ['分红数据 ok / 缺失 / 异常', N(DIV.dataOk) + ' / ' + N(DIV.dataMissing) + ' / ' + N(DIV.dataError) + ' 只'],
+      ['不复权收盘缺失（月线 / 数据截止日）', N(DIV.pxMissing) + ' / ' + N(DIV.rawCloseEndMissing) + ' 只'],
+      ['股息率(近12月) 中位 · Q1 · Q3 · P90 · 最大 —— 全部入选（' + ttmAll.length + ' 只，含 0）', qRow(ttmAll)],
+      ['股息率(近12月) 中位 · Q1 · Q3 · P90 · 最大 —— 近12月有分红者（' + ttmPay.length + ' 只）', qRow(ttmPay) + (maxR ? '（最大：' + maxR.name + ' ' + maxR.code + '，' + bd(maxR) + '）' : '')],
+      ['FY2016–' + LAST_FY + ' 十年中分红 ≥ 8 年 / 10 年全分红（分母：上市于 2016 年及以前的入选个股 ' + lb + ' 只）', nShare(DIV.payingGe8of10 || 0, lb) + ' / ' + nShare(DIV.paying10of10 || 0, lb)],
+      ['连续分红年数分布 ' + sKeys.join(' / '), sKeys.map((k) => hist[k]).join(' / ') + ' 只'],
+      ['零分红个股（上市至今无现金分红）', N(DIV.zeroDividendStocks != null ? DIV.zeroDividendStocks : zero) + ' 只'],
+      ['红利榜入围（分红数据 ok 且连续分红 ≥ ' + STREAK_MIN + ' 年）', '上市至今 ' + N(DIV.boardSizes && DIV.boardSizes.all) + ' 只' + WINDOWS.map((W) => ' · ' + W.label + ' ' + N(DIV.boardSizes && DIV.boardSizes[W.key]) + ' 只').join('')],
+    ]));
+    L.push('');
+  }
+  // 红利榜 Top 50（上市至今）
+  const divBoard = byBoard(T, 'dividend');
+  const legendDiv = (n, W) => '红利分 = 股息率(近12月)、连续分红年数、最大回撤 三项百分位等权平均，百分位在 ' + n + ' 只' + (W ? '窗口' : '') + '入选个股（全部板块）内计算；门槛：分红数据完整且连续分红 ≥ ' + STREAK_MIN + ' 年；三个阈值下名次相同（表中名次取 30%）。「分红年数」为 x/N（' + (W ? W.label + '：' : '上市至今：') + fyRange(W) + '），「年化」「最大回撤」为现有后复权指标，「年化(分红再投资)」「分红贡献」为不复权价 + 分红再投资口径（`recon_drift` = 拆分对账未通过、置空）。';
+  L.push('### 红利榜 Top ' + TOP_N + '（上市至今，30%）');
+  L.push('');
+  L.push(legendDiv(elig.length, null) + ' 入围 ' + divBoard.length + ' 只（' + boardSplit(divBoard) + '）。');
+  L.push('');
+  L.push(table(['#', '名称', '代码', '板块', '行业', '上市日', '股息率(近12月)', '连续分红', '分红年数', '平均股息率', ...(HAS_PAYOUT ? ['派息率'] : []), '年化', '最大回撤', '年化(分红再投资)', '分红贡献', '综合排名 30%', '看板'],
+    divBoard.slice(0, TOP_N).map((r) => { const t = r.th[T], d = dv(r); return [t.dividendRank, r.name, r.code, bd(r), r.industry, r.listDate, PN(d.divYieldTTM, 2), N(d.divStreak), yrs(d), PN(d.avgDivYield, 2), ...(HAS_PAYOUT ? [PN(d.payoutRatio, 0)] : []), P(r.cagr), P(r.maxDD), P(d.cagrTR), ppCell(d, d.divContrib), N(t.rank), link(r, T)]; })));
+  L.push('');
+  L.push('Top ' + TOP_N + ' 板块构成：' + boardSplit(divBoard.slice(0, TOP_N)) + '；其中同时进入上市至今综合榜 Top 50（30%）的 ' + divBoard.slice(0, TOP_N).filter((r) => r.th[T].rank <= TOP_N).length + ' 只、综合排名 ≤ 300 的 ' + divBoard.slice(0, TOP_N).filter((r) => r.th[T].rank <= 300).length + ' 只。');
+  L.push('');
+  for (const W of WINDOWS) {
+    const wb = wByBoard(W, T, 'dividend');
+    L.push('### 红利榜 Top ' + BOARD_N + '（' + W.label + '，30%）');
+    L.push('');
+    L.push(legendDiv(wElig(W).length, W) + ' 入围 ' + wb.length + ' 只（' + boardSplit(wb) + '）。');
+    L.push('');
+    L.push(table(['#', '名称', '代码', '板块', '行业', '区间起点', '股息率(近12月)', '连续分红', '分红年数', '平均股息率', ...(HAS_PAYOUT ? ['派息率'] : []), '年化', '最大回撤', '年化(分红再投资)', '分红贡献', '窗口综合排名 30%', '看板'],
+      wb.slice(0, BOARD_N).map((r) => { const w = r.windows[W.key], t = w.th[T], d = dv(w); return [t.dividendRank, r.name, r.code, bd(r), r.industry, w.window.start, PN(d.divYieldTTM, 2), N(d.divStreak), yrs(d), PN(d.avgDivYield, 2), ...(HAS_PAYOUT ? [PN(d.payoutRatio, 0)] : []), P(w.cagr), P(w.maxDD), P(d.cagrTR), ppCell(d, d.divContrib), N(t.rank), linkR(r, T, W.key)]; })));
+    L.push('');
+  }
+  // 现有综合榜 Top 50 的分红贡献
+  function contribTable(title, rows, view, range) {
+    L.push('### 现有综合榜 Top ' + TOP_N + ' 的分红贡献（' + title + ' 30%）');
+    L.push('');
+    L.push(table(['#', '名称', '代码', '板块', '年化(后复权)', '年化(分红再投资)', '纯价格年化', '分红贡献', '股息率(近12月)', '连续分红', '看板'],
+      rows.map((r) => { const v = view(r), t = v.th[T], d = dv(v); if (!d) return [t.rank, r.name, r.code, bd(r), P(v.cagr), '数据缺失', '—', '—', '—', '—', linkR(r, T, range)]; return [t.rank, r.name, r.code, bd(r), P(v.cagr), P(d.cagrTR), P(d.cagrPx), ppCell(d, d.divContrib), PN(d.divYieldTTM, 2), N(d.divStreak), linkR(r, T, range)]; })));
+    L.push('');
+    const ds = rows.map((r) => dv(view(r))).filter(Boolean);
+    const contrib = ds.map((d) => d.divContrib).filter((x) => x != null);
+    const flags = {}; for (const d of ds) if (d.trFlag) flags[d.trFlag] = (flags[d.trFlag] || 0) + 1;
+    L.push('解读：这 ' + rows.length + ' 只中分红贡献可计算的 ' + contrib.length + ' 只，中位 ' + PP(median(contrib)) + '（最大 ' + PP(contrib.length ? Math.max(...contrib) : null) + '，最小 ' + PP(contrib.length ? Math.min(...contrib) : null) + '）；连续分红 ≥ 10 年的 ' + ds.filter((d) => d.divStreak >= 10).length + ' 只，股息率(近12月) ≥ 3% 的 ' + ds.filter((d) => d.divYieldTTM >= 0.03).length + ' 只，近12月无分红的 ' + ds.filter((d) => !(d.divYieldTTM > 0)).length + ' 只；带标记的 ' + Object.keys(flags).reduce((s, k) => s + flags[k], 0) + ' 只（' + (Object.keys(flags).length ? Object.keys(flags).map((k) => k + ' ' + flags[k]).join('、') : '无') + '）' + (rows.length - ds.length ? '；分红数据缺失 ' + (rows.length - ds.length) + ' 只' : '') + '。');
+    L.push('');
+  }
+  contribTable('上市至今', byRank(T).slice(0, TOP_N), (r) => r, 'all');
+  contribTable(W10.label, wByRank(W10, T).slice(0, TOP_N), (r) => r.windows[W10.key], W10.key);
+  // 后复权口径与分红再投资的差异
+  L.push('### 后复权口径与分红再投资的差异');
+  L.push('');
+  const tg = DIV.trGap || {};
+  const tgTxt = (k, label) => (tg[k] && tg[k].n ? label + '（' + tg[k].n + ' 只）中位 ' + PPA(tg[k].median) + ' · P90 ' + PPA(tg[k].p90) + ' · 最大 ' + PPA(tg[k].max) : label + ' —');
+  L.push('东财后复权（fqt=2）对现金分红是**加性**处理：hfq(t) = S(t)·raw(t) + D(t)，S 为累计送转因子、D 为历史现金（按当时股本折算）的累加常数，锚定上市首日（实测：' + DIV.hfqMethod + '）。这意味着现有「年化」列把每笔分红当作持有现金、不再投资，对长历史高分红个股会低估含分红的复合收益，对大跌后的个股则因 D 相对股价变大而高估。「年化(分红再投资)」用不复权价把分红按除息后首个月末收盘买回，是复合口径；二者差值 |年化(分红再投资) − 年化(后复权,同起点)|：' + tgTxt('all', '上市至今') + WINDOWS.map((W) => '；' + tgTxt(W.key, W.label)).join('') + '。超过 ' + PN(DIV_CFG.TR_GAP_MAX, 0) + ' 标 `hfq_gap` 的个股：上市至今 ' + N(DIV.hfqGapStocks && DIV.hfqGapStocks.all) + ' 只' + WINDOWS.map((W) => '、' + W.label + ' ' + N(DIV.hfqGapStocks && DIV.hfqGapStocks[W.key]) + ' 只').join('') + '（窗口越短、累计 D 相对价格越大，差值越大，这是后复权口径本身的性质，不是对账失败）。对账补齐 ' + N(DIV.synthEvents) + ' 笔（' + N(DIV.stocksWithSynth) + ' 只' + (DIV.synthCoincidentEvents ? '，其中 ' + DIV.synthCoincidentEvents + ' 笔与明细同月、可能是同日特别分红或东财复权的重复计入' : '') + '）；`recon_drift` 上市至今 ' + N(DIV.driftStocks) + ' 只' + (DIV.localReconOk ? '，窗口内局部对账后近10年 / 近5年 分别恢复 ' + N(DIV.localReconOk['10y']) + ' / ' + N(DIV.localReconOk['5y']) + ' 只' : '') + '。');
+  L.push('');
+  const topYield = elig.filter((r) => dv(r) && dv(r).divYieldTTM != null).sort((a, b) => dv(b).divYieldTTM - dv(a).divYieldTTM || a.code.localeCompare(b.code)).slice(0, 20);
+  L.push('股息率(近12月)最高的 20 只（上市至今口径）：');
+  L.push('');
+  L.push(table(['#', '名称', '代码', '板块', '股息率(近12月)', '连续分红', '年化(后复权)', '年化(分红再投资)', '纯价格年化', '差值(pp)', '看板'],
+    topYield.map((r, i) => { const d = dv(r); return [i + 1, r.name, r.code, bd(r), PN(d.divYieldTTM, 2), N(d.divStreak), P(r.cagr), P(d.cagrTR), P(d.cagrPx), ppCell(d, d.cagrTR != null && d.cagrHfqAligned != null ? d.cagrTR - d.cagrHfqAligned : null), link(r, T)]; })));
+  L.push('');
+}
+
+// ---- 12. 口径与局限
 L.push('## ' + sec++ + '. 口径与局限');
 L.push('');
 L.push('- ' + SOURCE_NOTE);
@@ -460,12 +591,23 @@ L.push('- 老股票几乎都经历过 2008 年 −70% 级别回撤，MaxDD 对�
 L.push('- ZigZag 的「牛市」是技术性两态定义（根目录 README 已说明）：多年横盘、反弹后部分回吐都归为「牛」，解读时结合「距阶段高点」和「距区间前高」。');
 L.push('- 月收盘识别转折会过滤短反弹，牛熊轮数比按日线少，这是看板的既定口径；阈值越高（40% / 50%）已完成轮次越少，上市刚满 5 年的股票可能一轮都没有。');
 L.push('- 数据终点：所有个股与指数统一截至 ' + (DATA_END || '—') + '（' + DATA_END_NOTE + '）；其后的 K 线（含盘中未收盘 K 线、其后几个交易日）在计算前已全部丢弃，`metrics_*.csv` 的「末根K线」列可核对。');
-L.push('- 重算与校验：`node tools/screen_all.js --compute-only [--data-end YYYY-MM-DD]` → `node tools/screen_report.js` → `node tools/screen_verify.js`（校验日志 `screen/out/screen_verify.log`）。');
+if (DIV) {
+  L.push('- 分红数据（v3.1）：东方财富数据中心 `RPT_SHAREBONUS_DET` 分红送转明细，税前、每 10 股口径，只取「实施」且除息日 ≤ 数据截止日的记录；实测该表并不完整（如贵州茅台 2022-12 / 2023-12 两次特别分红缺失），缺的现金事件按东财后复权序列的干净台阶补齐（本次 ' + N(DIV.synthEvents) + ' 笔 / ' + N(DIV.stocksWithSynth) + ' 只，其中 ' + N(DIV.synthCoincidentEvents) + ' 笔与明细同月、可能重复）；补不齐或送转因子不符（含配股 —— 明细不含配股）的个股标 `recon_drift`（上市至今 ' + N(DIV.driftStocks) + ' 只' + (DIV.driftViews ? '，近10年 / 近5年窗口内局部对账后 ' + N(DIV.driftViews['10y']) + ' / ' + N(DIV.driftViews['5y']) + ' 只' : '') + '），其年化(分红再投资) / 纯价格年化 / 分红贡献 为空，股息率 / 分红年数 / 连续分红仍按明细（含补齐）计算。分红数据缺失 ' + N(DIV.dataMissing) + ' 只。');
+  L.push('- 不复权价格（v3.1）：腾讯 `web.ifzq.gtimg.cn` 月收盘 + 数据截止日收盘，不复权。再投资发生在除息后首个月末（而非除息日）、平均股息率用除息月前一月末收盘（而非除息前一日），均为月末近似；数据截止日停牌的个股取其前最后一个交易日收盘（`metrics_*.csv`「不复权收盘日」列）。');
+  L.push('- 后复权口径（v3.1）：东财 fqt=2 对现金分红加性处理（hfq = S·raw + D），现有「年化」列等价于分红不再投资；「年化(分红再投资)」为复合口径，二者差值在长历史高分红或大跌个股上可达数个百分点（|差值| > ' + PN(DIV_CFG.TR_GAP_MAX, 0) + ' 标 `hfq_gap`，上市至今 ' + N(DIV.hfqGapStocks && DIV.hfqGapStocks.all) + ' 只、近10年 ' + N(DIV.hfqGapStocks && DIV.hfqGapStocks['10y']) + ' 只、近5年 ' + N(DIV.hfqGapStocks && DIV.hfqGapStocks['5y']) + ' 只；`CONFIG.DIV.NULL_ON_HFQ_GAP = ' + String(!!DIV_CFG.NULL_ON_HFQ_GAP) + '`，' + (DIV_CFG.NULL_ON_HFQ_GAP ? '标记时分红贡献置空' : '仅标记、不置空') + '）。现有指标与名次均未改动。');
+  L.push(HAS_PAYOUT
+    ? '- 派息率（v3.1）= Σ 现金 ÷ Σ 年报基本 EPS（有年报 EPS 的分红年度，现金加权），EPS 取明细年报行的 `BASIC_EPS`，不是最新一期；亏损或 EPS 缺失的年度不计，比例可大于 100%。'
+    : '- 派息率（v3.1）：本次不输出（' + (DIV.hasPayoutReason || 'hasPayout false') + '）。');
+  L.push('- 会计年度归属（v3.1）：按报告期归属，中期 / 季度分红归其所在年度；无报告期的记录与补齐事件按除息月归属（1–8 月 → 上一年度）。「连续分红」自 FY' + LAST_FY + ' 向前倒数、不受区间限制，上市前一年度的分红（上市后除息）也计入，因此可大于区间年数 N。股息率(近12月)按除息日落在近 12 个月内的现金计，一年两次派息的个股在中期派息刚过时偏高、刚过年度派息时偏低。');
+}
+L.push('- 重算与校验：`node tools/screen_all.js --compute-only [--data-end YYYY-MM-DD]' + (DIV ? ' [--today YYYY-MM-DD] [--no-dividends]' : '') + '` → `node tools/screen_report.js` → `node tools/screen_verify.js' + (DIV ? ' [--baseline <v3 产出目录>]' : '') + '`（校验日志 `screen/out/screen_verify.log`）' + (DIV ? '；分红 / 不复权缓存由 `node tools/fetch_dividends.js --pass dividends | prices` 拉取（见 `screen/README.md`）' : '') + '。');
 L.push('');
 fs.writeFileSync(path.join(PUB, 'report.md'), L.join('\n'), 'utf8');
 
 // ------------------------------------------------------------------ screen.html 壳 + screen/data/*.js（紧凑数组打包：按区间 × 阈值拆文件，首屏 meta + all + all_th30）
 const BASE_KEYS = ['code', 'name', 'secid', 'board', 'industry', 'listDate', 'years', 'total', 'cagr', 'maxDD', 'ddPeak', 'ddTrough', 'ddDownDays', 'ddRecDays', 'ddRecovered', 'ddSinceTroughDays', 'curDD', 'calmar', 'roll5yP10', 'excessSz', 'pareto', 'winStart']; // 页面只读这 22 项（vol / roll5yMedian / roll5yWin 不再输出）
+// v3.1 分红键追加在末尾（旧键顺序 / 取值不变，*_th*.js 不受影响）：divMiss = 1 表示该行该区间分红数据缺失（页面所有分红列显示 —）；dividendRank 取 30% 的红利榜名次（三阈值相同，下方断言）
+if (DIV) BASE_KEYS.push('divYieldTTM', 'divYears', 'divN', 'divStreak', 'avgDivYield', ...(HAS_PAYOUT ? ['payoutRatio'] : []), 'divContrib', 'dividendRank', 'divMiss');
 const WIN_BASE_KEYS = BASE_KEYS.slice(6); // code/name/secid/board/industry/listDate 六个身份字段来自全史行（按下标对齐；模板 materialize 时复制）
 const TH_KEYS = ['nBull', 'nBear', 'nCB', 'nBQ', 'bearSrc', 'avgBearRet', 'avgBullRet', 'deepestBearRet', 'bullNewHighRate', 'bearHigherLowRate', 'bullTimeShare', 'curBull', 'curRet', 'composite', 'rank', 'steadyRank', 'attackRank', 'crossRank'];
 const r4 = (x) => (x == null || !isFinite(x) ? null : Math.round(x * 1e4) / 1e4);
@@ -479,6 +621,14 @@ function baseValue(v, baseRow, k) {
     case 'roll5yP10': return v.roll5y ? r4(v.roll5y.p10) : null;
     case 'excessSz': return r4(v.bench.excessCagr); case 'pareto': return !!v.pareto; case 'winStart': return v.window ? v.window.start : null;
     case 'ddPeak': case 'ddTrough': return v[k]; case 'ddDownDays': case 'ddRecDays': case 'ddSinceTroughDays': return v[k]; case 'ddRecovered': return !!v.ddRecovered;
+    case 'divMiss': return dv(v) ? 0 : 1;
+    case 'divYears': case 'divN': case 'divStreak': { const d = dv(v); return d && d[k] != null ? d[k] : null; }
+    case 'divYieldTTM': case 'avgDivYield': case 'payoutRatio': case 'divContrib': { const d = dv(v); return d ? r4(d[k]) : null; }
+    case 'dividendRank': {
+      const ranks = THRESHOLDS.map((T) => (v.th && v.th[T] ? v.th[T].dividendRank : undefined));
+      if (ranks.some((x) => x !== ranks[0])) throw new Error('dividendRank differs across thresholds for ' + baseRow.secid + ' ' + (v.window ? v.window.start : 'all') + ': ' + JSON.stringify(ranks));
+      return ranks[0] == null ? null : ranks[0];
+    }
     default: return r4(v[k]);
   }
 }
@@ -496,7 +646,8 @@ const benchPack = (f) => benchmarks.map((b) => { const v = f(b); return v ? { na
 const htmlBench = { all: benchPack((b) => b) }; for (const W of WINDOWS) htmlBench[W.key] = benchPack((b) => b.windows && b.windows[W.key]);
 const windowEligible = {}; for (const W of WINDOWS) windowEligible[W.key] = wElig(W).length;
 const boards = {}; for (const b of BOARD_ORDER) { boards[b] = { universe: boardCount(results, b), eligible: boardCount(elig, b) }; for (const W of WINDOWS) boards[b]['w' + W.key] = boardCount(wElig(W), b); }
-const htmlMeta = { version: VER.replace(/^v/i, ''), source: SOURCE, sourceLabel: SOURCE_LABEL, sourceNote: SOURCE_NOTE, universeNote: INTERIM_NOTE_HTML, dataEndDate: DATA_END, dataEndSpec: DATA_END_SPEC, dataEndMode: DATA_END_MODE, universe: results.length, eligible: elig.length, windowEligible, boards, universeFetchedAt: uf && uf.fetchedAt ? uf.fetchedAt.slice(0, 10) : null, generated: new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC', thresholds: THRESHOLDS, benchmarks: htmlBench, industries: INDUSTRIES };
+const htmlMeta = { version: VER.replace(/^v/i, ''), source: SOURCE, sourceLabel: SOURCE_LABEL, sourceNote: SOURCE_NOTE, universeNote: INTERIM_NOTE_HTML, dataEndDate: DATA_END, dataEndSpec: DATA_END_SPEC, dataEndMode: DATA_END_MODE, universe: results.length, eligible: elig.length, windowEligible, boards, universeFetchedAt: uf && uf.fetchedAt ? uf.fetchedAt.slice(0, 10) : null, generated: new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC', thresholds: THRESHOLDS, benchmarks: htmlBench, industries: INDUSTRIES,
+  hasPayout: HAS_PAYOUT, div: DIV ? { lastFY: LAST_FY, ttmFrom: TTM_FROM, ttmTo: DATA_END, streakMin: STREAK_MIN, dataMissing: DIV.dataMissing != null ? DIV.dataMissing : null, synthEvents: DIV.synthEvents != null ? DIV.synthEvents : null } : null }; // v3.1：hasPayout 决定页面是否有「派息率」列；div 为页脚 / 自动化核对用的口径参数
 const safeJSON = (o) => JSON.stringify(o).replace(/</g, '\\u003c').replace(/-->/g, '--\\u003e');
 // 数据文件：纯 JS 赋值（<script> 注入即可读，file:// 下无需 fetch）；先清掉目录里的旧 *.js，避免残留过期文件
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -515,4 +666,7 @@ const html = fs.readFileSync(TEMPLATE, 'utf8').split('__DASH_BASE__').join(DASH_
 if (/__META__|__KEYS__|__DATA__|__WIN__/.test(html)) throw new Error('screen_template.html still contains an inline data placeholder (__META__ / __KEYS__ / __DATA__ / __WIN__)');
 if (Buffer.byteLength(html) >= 60 * 1024) throw new Error('screen.html shell too large: ' + Buffer.byteLength(html) + ' bytes (limit 61440)');
 fs.writeFileSync(HTML_OUT, html, 'utf8');
-process.stdout.write('report.md lines=' + L.length + ' eligible=' + elig.length + ' boards=' + JSON.stringify(boards) + ' windows=' + JSON.stringify(windowEligible) + ' pareto=' + pareto.length + ' inAll3=' + inAll.length + ' shell bytes=' + Buffer.byteLength(html) + ' data files=' + JSON.stringify(sizes) + ' startup(meta+all+all_th30)=' + startupBytes + ' bytes -> ' + HTML_OUT + ' + ' + DATA_DIR + '\n');
+// 首屏传输量（Pages 走 gzip）：壳 + meta.js + all.js + all_th30.js 的 gzip-6 字节数，预算 512,000（tools/screen_verify.js H. 同口径）
+const gz = (s) => zlib.gzipSync(Buffer.from(s, 'utf8'), { level: 6 }).length;
+const startupGzip = gz(html) + ['meta.js', 'all.js', 'all_th30.js'].reduce((s, f) => s + gz(fs.readFileSync(path.join(DATA_DIR, f), 'utf8')), 0);
+process.stdout.write('report.md lines=' + L.length + ' eligible=' + elig.length + ' boards=' + JSON.stringify(boards) + ' windows=' + JSON.stringify(windowEligible) + ' pareto=' + pareto.length + ' inAll3=' + inAll.length + ' dividends=' + (DIV ? 'on(keys.base=' + BASE_KEYS.length + ',hasPayout=' + HAS_PAYOUT + ')' : 'off') + ' shell bytes=' + Buffer.byteLength(html) + ' data files=' + JSON.stringify(sizes) + ' startup(meta+all+all_th30)=' + startupBytes + ' bytes startup gzip(shell+meta+all+all_th30)=' + startupGzip + ' bytes (budget 512000) -> ' + HTML_OUT + ' + ' + DATA_DIR + '\n');
