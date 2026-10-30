@@ -46,6 +46,8 @@
  *      派息率（Σ现金 ÷ Σ年报 EPS，全局开关 hasPayout）、分红增长（拆分调整年度 DPS 的 CAGR）、年化(分红再投资)（月末不复权价 + 除息后首个月末按收盘再投资）、纯价格年化、分红贡献 = 二者之差、年化(后复权,同起点)、标记（hfq_gap / recon_drift / px_missing / trend_month）。
  *   5. 排名：COMPOSITE_WEIGHTS 新增 divYieldTTM / divStreak 权重 0（综合分不变；compositeN 只数正权重项）；新增红利榜 dividend = 股息率TTM + 连续分红 + 最大回撤 百分位均值，门槛 BOARD_GATE：分红数据 ok 且连续分红 ≥ STREAK_MIN_FOR_BOARD。
  *   6. CSV：新列一律追加在「数据源」之后；run_meta.json 新增 today / dividends；--today / --no-dividends 见用法。
+ *   7. 分红口径的实现（事件归一化、送转折算、TTM、连续分红、区间统计、再投资年化）移至仓库根目录 dividends.js，个股看板与本脚本共用同一份；
+ *      本脚本保留后复权对账补齐（reconcileDiv / estimateS0 / buildPricePoints）与标记 / CSV 管道，产出逐字节不变。
  */
 'use strict';
 const https = require('https');
@@ -134,6 +136,7 @@ const CONFIG = {
 };
 
 const E = require('../app.js'); // 看板引擎（analyze / computeHorizons / yearlyReturns / 日期工具），只读不改
+const DIV = require('../dividends.js'); // 分红口径（事件归一化 / TTM / 连续分红 / 区间统计 / 再投资年化），与个股看板共用同一份实现
 const DAY = 86400000;
 const HEADERS = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://quote.eastmoney.com/' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -687,8 +690,8 @@ function computeWindows(barsTC, secid, benches) {
 //   近 12 个区间 ≥ RECON_DRIFT_MONTHS 个无法解释 → recon_drift（送转 / 配股与表不符，S 失配后残差随价格漂移）：再投资类指标置空，补齐候选一律不采用（S 失配下的正残差多为噪声，会被误判成分红）。
 const DIV_STATE = { hasPayout: null };  // 派息率列是否输出（computeStage 在写 CSV 前按全市场规则决定）
 const DIV_KEYS = ['data', 'px', 'rawCloseEnd', 'rawCloseDate', 'dpsTTM', 'divYieldTTM', 'divStreak', 'fyFrom', 'fyTo', 'divN', 'divYears', 'avgDivYield', 'payoutRatio', 'dpsCagr', 'cagrTR', 'cagrPx', 'divContrib', 'cagrHfqAligned', 'trFlag', 'trStart', 'trStartKind', 'trEnd', 'nEvents', 'nSynth', 'recon'];
-const divLastFY = () => (CONFIG.DIV.LAST_FY != null ? CONFIG.DIV.LAST_FY : +String(CONFIG.DATA_END).slice(0, 4) - 1);
-const fyByExDate = (ex) => { const y = +ex.slice(0, 4), m = +ex.slice(5, 7); return m <= 8 ? y - 1 : y; }; // 1–8 月除息多为上一年度 年度/中期派息；9–12 月除息的中期 / 特别派息归当年
+const divLastFY = () => (CONFIG.DIV.LAST_FY != null ? CONFIG.DIV.LAST_FY : DIV.fiscalYearRule(E.parseYMD(CONFIG.DATA_END))); // 最近一个完整会计年度 = year(DATA_END) − 1（dividends.js）
+const fyByExDate = DIV.fyByExDate; // 1–8 月除息多为上一年度 年度/中期派息；9–12 月除息的中期 / 特别派息归当年（补齐事件用）
 function loadDivCache(secid) {
   const p = path.join(CONFIG.DIV.DIR, secid + '.json');
   if (!fs.existsSync(p)) return null;
@@ -699,29 +702,8 @@ function loadPxCache(secid) {
   if (!fs.existsSync(p)) return null;
   try { const j = readJSON(p); return j && Array.isArray(j.month) ? j : null; } catch (e) { return null; }
 }
-const numOr0 = (v) => (v == null || v === '' || !isFinite(+v) ? 0 : +v);
-// 原始行 → 事件（按除息日升序；同日同额同因子去重）：只认「实施」且有除息日且除息日 ≤ DATA_END 的行；现金或送转至少一项 > 0
-function normDivEvents(rows, dataEndT) {
-  const out = [];
-  for (const r of rows) {
-    if (!r || !/实施/.test(String(r.ASSIGN_PROGRESS || '')) || !r.EX_DIVIDEND_DATE) continue;
-    const ex = String(r.EX_DIVIDEND_DATE).slice(0, 10);
-    if (!isYMD(ex)) continue;
-    const exT = E.parseYMD(ex);
-    if (exT > dataEndT) continue;
-    const rep = r.REPORT_DATE ? String(r.REPORT_DATE).slice(0, 10) : null;
-    const cash = numOr0(r.PRETAX_BONUS_RMB) / 10;
-    const bit = r.BONUS_IT_RATIO != null && r.BONUS_IT_RATIO !== '' && isFinite(+r.BONUS_IT_RATIO) ? +r.BONUS_IT_RATIO : numOr0(r.BONUS_RATIO) + numOr0(r.IT_RATIO);
-    const split = 1 + (bit > 0 ? bit : 0) / 10;
-    if (!(cash > 0) && !(split > 1)) continue;
-    const eps = r.BASIC_EPS != null && r.BASIC_EPS !== '' && isFinite(+r.BASIC_EPS) ? +r.BASIC_EPS : null;
-    out.push({ ex, exT, rep, fy: rep && /^\d{4}-/.test(rep) ? +rep.slice(0, 4) : fyByExDate(ex), cash: rd(cash, 6), split: rd(split, 6), eps, isAnnual: !!rep && rep.endsWith('-12-31'), src: 'table' });
-  }
-  const seen = new Set(), ded = [];
-  for (const e of out) { const k = e.ex + '|' + e.cash + '|' + e.split; if (seen.has(k)) continue; seen.add(k); ded.push(e); }
-  ded.sort((a, b) => a.exT - b.exT);
-  return ded;
-}
+// 原始行 → 事件（按除息日升序；同日同额同因子去重）：只认「实施」且有除息日且除息日 ≤ DATA_END 的行；现金或送转至少一项 > 0（实现见 dividends.js normalizeEvents）
+const normDivEvents = DIV.normalizeEvents;
 // 价格点（日期升序，每点带同日 hfq，无同日 K 线的点跳过）：
 //   [上市首日锚点：首根 hfq K 线，raw = hfq（仅当首个可对照月末的 hfq 与不复权月收盘相差 ≤0.5%，即 hfq 锚定于上市且期间无事件）]
 //   + 月末不复权收盘（≤ DATA_END，不含 DATA_END 所在月 —— 该月由终点代表）+ 终点（day 行里 DATA_END 当日收盘，否则最后一根 ≤ DATA_END 的 day 行）
@@ -861,68 +843,36 @@ function computeDividendViews(row, barsTC) {
       recon.synthFromWindow = extra.length;
     }
   }
-  // 每股现金折算到当前股本：÷ Sfwd = Π 除息日 ≥ 该事件除息日 的送转因子（同日送转含在内：现金按送转前股数支付）
-  const sFwd = new Array(events.length);
-  { let s = 1, i = events.length - 1; while (i >= 0) { let j = i; while (j - 1 >= 0 && events[j - 1].exT === events[i].exT) j--; for (let k = j; k <= i; k++) s *= events[k].split; for (let k = j; k <= i; k++) sFwd[k] = s; i = j - 1; } }
+  // 每股现金折算到当前股本（÷ Π 其后送转因子）、每股分红TTM、按会计年度汇总、连续分红年数 —— 口径实现在 dividends.js（看板共用）
+  const sFwd = DIV.splitForwardFactors(events);
   const ttmFrom = dataEndT - cfg.TTM_DAYS;
-  let dpsTTM = 0;
-  const cashFY = new Map(), dpsAdjFY = new Map(), epsFY = new Map();
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
-    if (e.exT > ttmFrom) dpsTTM += e.cash / sFwd[i];
-    if (e.fy <= lastFY) {
-      if (e.cash > 0) { cashFY.set(e.fy, (cashFY.get(e.fy) || 0) + e.cash); dpsAdjFY.set(e.fy, (dpsAdjFY.get(e.fy) || 0) + e.cash / sFwd[i]); }
-      if (e.src === 'table' && e.isAnnual && e.eps != null && e.eps > 0 && !epsFY.has(e.fy)) epsFY.set(e.fy, e.eps);
-    }
-  }
-  let streak = 0; for (let fy = lastFY; cashFY.has(fy); fy--) streak++;
-  base.dpsTTM = rd(dpsTTM, 4);
-  base.divYieldTTM = base.rawCloseEnd ? rd(dpsTTM / base.rawCloseEnd, 4) : null;
-  base.divStreak = streak;
+  const agg = DIV.aggregate(events, sFwd, lastFY, ttmFrom);
+  base.dpsTTM = rd(agg.dpsTTM, 4);
+  base.divYieldTTM = base.rawCloseEnd ? DIV.yieldTTM(agg.dpsTTM, base.rawCloseEnd) : null;
+  base.divStreak = agg.streak;
   base.nEvents = events.length; base.nSynth = events.filter((e) => e.src === 'hfq').length; base.recon = recon;
   // 除息前一月末不复权收盘：按日历月查；缺则取除息月之前最近一个月收盘；再缺取上市首日锚点
-  const byYM = new Map(); for (const m of pp.monthsAll) byYM.set(m.date.slice(0, 7), m.raw);
-  const prevMonthClose = (exT) => {
-    const d = E.tToDate(exT), y = d.getUTCFullYear(), mo = d.getUTCMonth(); // 0 起
-    const py = mo === 0 ? y - 1 : y, pm = mo === 0 ? 11 : mo - 1;
-    const direct = byYM.get(py + '-' + String(pm + 1).padStart(2, '0'));
-    if (direct != null) return direct;
-    const firstOfMonth = Date.UTC(y, mo, 1) / DAY;
-    let best = null; for (const m of pp.monthsAll) { if (m.t < firstOfMonth) best = m.raw; else break; }
-    if (best != null) return best;
-    return pp.anchor ? pp.anchor.raw : null;
-  };
-  let skippedYield = 0;
-  const yieldByEvent = events.map((e) => { if (!(e.cash > 0) || e.fy > lastFY) return null; const p = prevMonthClose(e.exT); if (!(p > 0)) { skippedYield++; return null; } return e.cash / p; });
-  recon.skippedYield = skippedYield;
+  const prevMonthClose = DIV.makePrevMonthClose(pp.monthsAll.map((m) => ({ t: m.t, c: m.raw })), pp.anchor ? pp.anchor.raw : null);
+  const ey = DIV.eventYields(events, lastFY, prevMonthClose);
+  const yieldByEvent = ey.yields;
+  recon.skippedYield = ey.skipped;
   // 再投资 / 纯价格 / 同起点后复权 年化：从起点 si 走到终点（终点 = DATA_END 当日点，否则最后一个月末点）
+  const ptsTC = pts.map((p) => ({ t: p.t, c: p.raw }));
   const trMetrics = (si, evs) => {
     if (si == null || si < 0 || si >= endIdx) return null;
-    const p0 = pts[si], p1 = pts[endIdx], years = (p1.t - p0.t) / 365.25;
-    if (!(years > 0)) return null;
-    let shares = 1, cumSplit = 1, ei = 0;
-    while (ei < evs.length && evs[ei].exT <= p0.t) ei++;
-    for (let p = si + 1; p <= endIdx; p++) {
-      while (ei < evs.length && evs[ei].exT <= pts[p].t) { const e = evs[ei++]; const cash = shares * e.cash; shares *= e.split; cumSplit *= e.split; shares += cash / pts[p].raw; }
-    }
-    return { cagrTR: Math.pow(shares * p1.raw / p0.raw, 1 / years) - 1, cagrPx: Math.pow(cumSplit * p1.raw / p0.raw, 1 / years) - 1, cagrHfqAligned: Math.pow(p1.hfq / p0.hfq, 1 / years) - 1, years };
+    const r = DIV.reinvestCagr(ptsTC, si, endIdx, evs);
+    if (!r) return null;
+    return { cagrTR: r.cagrTR, cagrPx: r.cagrPx, cagrHfqAligned: Math.pow(pts[endIdx].hfq / pts[si].hfq, 1 / r.years) - 1, years: r.years };
   };
   row.divEvents = events.map((e) => Object.assign({ ex: e.ex, fy: e.fy, cash: e.cash, split: e.split, src: e.src, rep: e.rep, eps: e.eps }, e.src === 'hfq' ? { co: !!e.co } : null));
   for (const [key, v, fyFrom, startT] of views) {
     const d = Object.assign({}, base);
-    d.fyFrom = fyFrom; d.divN = Math.max(0, lastFY - fyFrom + 1);
-    let years = 0, sumCash = 0, sumEps = 0, sumYield = 0;
-    const payingFys = [];
-    for (let fy = fyFrom; fy <= lastFY; fy++) {
-      if (!cashFY.has(fy)) continue;
-      years++; payingFys.push(fy);
-      if (epsFY.has(fy)) { sumCash += cashFY.get(fy); sumEps += epsFY.get(fy); }
-    }
-    d.divYears = years;
-    for (let i = 0; i < events.length; i++) if (yieldByEvent[i] != null && events[i].fy >= fyFrom) sumYield += yieldByEvent[i];
-    d.avgDivYield = base.px === 'ok' && d.divN > 0 ? rd(sumYield / d.divN, 4) : null;
-    d.payoutRatio = sumEps > 0 ? rd(sumCash / sumEps, 4) : null;
-    if (payingFys.length >= 3) { const f0 = payingFys[0], f1 = payingFys[payingFys.length - 1], a = dpsAdjFY.get(f0), b = dpsAdjFY.get(f1); d.dpsCagr = f1 > f0 && a > 0 && b > 0 ? rd(Math.pow(b / a, 1 / (f1 - f0)) - 1, 4) : null; }
+    const ws = DIV.windowStats(events, yieldByEvent, agg, fyFrom, lastFY);
+    d.fyFrom = fyFrom; d.divN = ws.divN;
+    d.divYears = ws.divYears;
+    d.avgDivYield = base.px === 'ok' ? ws.avgDivYield : null;
+    d.payoutRatio = ws.payoutRatio;
+    d.dpsCagr = ws.dpsCagr;
     const si = pts.length >= 2 ? (key === 'all' ? 0 : startIdx(startT)) : null;
     let evs = events, drift = recon.drift;
     if (localRC[key]) { d.recon = localRC[key].recon; drift = localRC[key].recon.drift; if (!drift) evs = localRC[key].events; }

@@ -13,7 +13,7 @@
     <span class="logo">📈</span>
     <div>
       <div class="brand-title">A股 / 场内ETF 历史表现看板</div>
-      <div class="brand-sub"><a class="back" href="screen.html" title="返回全市场筛选表（主页）">← 全市场筛选</a> &nbsp;|&nbsp; 对数走势 · 最大回撤 · 牛熊周期 · 多尺度涨跌 &nbsp;|&nbsp; 数据：东方财富（日线，实时拉取）</div>
+      <div class="brand-sub"><a class="back" href="screen.html" title="返回全市场筛选表（主页）">← 全市场筛选</a> &nbsp;|&nbsp; 对数走势 · 最大回撤 · 牛熊周期 · 多尺度涨跌 · 分红 &nbsp;|&nbsp; 数据：东方财富（日线 / 分红明细，实时拉取）</div>
     </div>
   </div>
   <div class="search-wrap">
@@ -101,6 +101,14 @@
     <div class="table-wrap"><table id="phaseTable" class="stat-table"></table></div>
   </section>
 
+  <section id="divCard" class="card" hidden>
+    <h3 class="card-title">分红 <span class="muted" id="divNote"></span></h3>
+    <div id="divKpis" class="kpis div-kpis"></div>
+    <h3 class="card-title">分红明细 <span class="muted" id="divTableNote"></span></h3>
+    <div class="table-wrap"><table id="divTable" class="stat-table"></table></div>
+    <div id="divMore" class="div-more" hidden><button id="btnDivMore" class="btn" type="button"></button></div>
+  </section>
+
   <section class="card help">
     <h3 class="card-title">说明</h3>
     <ul>
@@ -108,6 +116,7 @@
       <li><b>回撤</b>：收盘价相对此前最高收盘的跌幅；虚线标注主要回撤（≥15%）自峰到谷的历时（月）；"最大回撤"给出幅度与峰谷/修复用时。</li>
       <li><b>牛熊划分</b>：峰谷法（ZigZag）。自阶段高点回落超过阈值即进入熊市，自阶段低点反弹超过阈值即进入牛市。为过滤短期噪音，先在月/周收盘上识别转折（"划分依据"，自动模式下区间 ≥6 年用月收盘、≥2 年用周收盘、否则用日收盘），再在相邻转折之间以日收盘精确定位峰谷；若价格跌破本轮牛市的起点（上一个谷），该"牛市"作废、视为熊市延续。标签：阶段结束年月 · 历时 · 阶段涨跌幅（≥12个月附年化），进行中的阶段另标"距高点/低点"。首段与末段为截断阶段，幅度可能小于阈值。<b>注意这是技术性定义</b>：模型只有牛/熊两态，"牛市阶段"= 自谷底反弹已超过阈值且尚未从阶段高点回落超过阈值，因此多年横盘（如只涨 15%）也会归为牛市；请结合"距阶段高点"和"距区间前高"一起看。</li>
       <li><b>多尺度涨跌</b>：以最新收盘为基准，分别对比 N 个自然日/月/年前（取不晚于该日的最近交易日）的收盘价；"24年9月24日至今"基准为 2024-09-23 收盘。</li>
+      <li><b>分红</b>（仅股票）：股息率(近12月)、连续分红、分红年数 x/N、平均股息率、派息率与分红贡献（分红再投资年化 − 纯价格年化）的口径与全市场筛选表相同，明细来自东方财富分红表，价格用不复权日线；分红年数、平均股息率、派息率、分红贡献随所选区间变化，连续分红与股息率(近12月)不随区间变化。连续分红 / 分红年数的终点是最近一个完整会计年度：9–12 月为当年 − 1；1–8 月若上一年度的年报分红尚未实施则为当年 − 2（卡片提示「年报分红尚未实施」），若上一年度只实施了中期派息则仍计该年度并提示「已含中期」。看板不做筛选表的后复权对账；后复权视图下，年化(分红再投资)与同区间后复权年化相差超过 2 个百分点时标 hfq_gap（复权口径差异，或分红表缺送转 / 配股记录），前复权 / 不复权视图不判（前复权从历史价中扣减其后分红，区间年化不可比）。年度涨跌幅卡片同时给出每个会计年度的每股分红与按年末价计的股息率。</li>
       <li>数据来自东方财富公开行情接口，前复权价格；本页为纯静态文件，无后端，直接双击 index.html 即可在本机使用（需联网拉取行情）。</li>
     </ul>
   </section>
@@ -116,6 +125,7 @@
 <footer class="foot">A股 / 场内ETF / LOF 历史表现看板 · 股票列表更新于 <span id="listDate">—</span></footer>
 
 <script src="stocks.js"></script>
+<script src="dividends.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

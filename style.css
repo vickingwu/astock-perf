@@ -143,6 +143,14 @@ main { max-width: 1180px; margin: 0 auto; padding: 14px 16px 30px; }
 .stat-table .bull td:first-child { color: var(--up); font-weight: 600; }
 .stat-table .bear td:first-child { color: var(--down); font-weight: 600; }
 
+/* dividends card */
+.div-kpis { margin: 0 0 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.div-kpis .kpi .v { font-size: 18px; }
+#divTable tr.more { display: none; }
+#divTable.expanded tr.more { display: table-row; }
+.div-more { margin-top: 8px; }
+.chip .s { font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; }
+
 .help ul { margin: 0; padding-left: 18px; color: #4b5563; font-size: 13px; }
 .help li { margin: 4px 0; }
 .foot { text-align: center; color: var(--muted); font-size: 12px; padding: 10px 0 24px; }

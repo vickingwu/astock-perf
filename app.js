@@ -1,6 +1,7 @@
 /* A股 / 场内ETF 历史表现看板
  * 纯静态、零依赖。数据：东方财富日线接口（JSONP，支持 file:// 直接打开）。
  * 模块：① 对数净值 + CAGR ② 回撤幅度/历时 ③ 牛熊阶段（ZigZag 峰谷法）④ 多尺度涨跌 + 分周期统计
+ *       ⑤ 分红（仅股票）：东方财富分红明细 + 不复权日线 → 股息率(近12月) / 连续分红 / 分红年数 / 平均股息率 / 派息率 / 分红贡献 / 分红明细，口径实现在 dividends.js（与 tools/screen_all.js 共用）
  */
 (function () {
   'use strict';
@@ -150,10 +151,17 @@
   }
 
   // ------------------------------------------------------------------ data
+  // market.code.fqt → Promise<{ name, code, market, bars, dropped }>：在途请求也缓存（同一序列并发只向 push2his 发一次，如 不复权 视图 + 分红卡片同时要 fqt=0）；失败即删，下次可重试
   const klineCache = new Map();
-  async function fetchKlines(market, code, fqt) {
+  function fetchKlines(market, code, fqt) {
     const key = market + '.' + code + '.' + fqt;
     if (klineCache.has(key)) return klineCache.get(key);
+    const p = fetchKlinesRemote(market, code, fqt);
+    klineCache.set(key, p);
+    p.catch(() => { if (klineCache.get(key) === p) klineCache.delete(key); });
+    return p;
+  }
+  async function fetchKlinesRemote(market, code, fqt) {
     const url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=' + market + '.' + code +
       '&ut=fa5fd1943c7b386f172d6893dbfba10b&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=' + fqt + '&beg=0&end=20500101&lmt=1000000';
     let j = null, lastErr = null;
@@ -169,9 +177,58 @@
       if (!(c > 0)) continue; // 前复权可能出现非正值，跳过
       bars.push({ t: parseYMD(p[0]), o: +p[1], c, h: +p[3], l: +p[4], v: +p[5], a: +p[6] });
     }
-    const out = { name: cleanName(j.data.name), code: j.data.code, market: j.data.market, bars, dropped: j.data.klines.length - bars.length };
-    klineCache.set(key, out);
-    return out;
+    return { name: cleanName(j.data.name), code: j.data.code, market: j.data.market, bars, dropped: j.data.klines.length - bars.length };
+  }
+
+  // ------------------------------------------------------------------ dividends（只对股票；口径实现在 dividends.js，与 tools/screen_all.js 共用）
+  // 分红明细：东方财富数据中心 RPT_SHAREBONUS_DET（与全市场筛选同一数据源）；不复权日线：push2his fqt=0
+  const DIV_URL = (code, page) => 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_SHAREBONUS_DET&columns=ALL&filter=(SECURITY_CODE%3D%22' + code + '%22)&pageSize=200&sortColumns=EX_DIVIDEND_DATE&sortTypes=-1&pageNumber=' + page;
+  const divLib = () => (typeof window !== 'undefined' && window.DIV) || null;
+  const divCache = new Map(); // market.code → Promise<{ rows, raw }>
+  // 一页分红表：先 fetch（接口带 access-control-allow-origin: *，file:// 与 https 页面都可直接请求，不必执行远端脚本）；fetch 不可用 / 失败 / 20 s 超时时改用 JSONP（script 标签，callback=）
+  async function fetchDivPage(code, page) {
+    const url = DIV_URL(code, page);
+    if (typeof fetch !== 'function') return jsonp(url, 'callback', 20000);
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ac ? setTimeout(() => ac.abort(), 20000) : null;
+    try {
+      const r = await fetch(url, { cache: 'no-store', signal: ac ? ac.signal : undefined });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } catch (e) {
+      return jsonp(url, 'callback', 20000);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+  // 分红表的 filter 只有 SECURITY_CODE（无市场）：同号的指数与深市个股会串表（如 1.000001 上证指数 ↔ 000001.SZ 平安银行；手输 hash / 不在 stocks.js 里的代码按股票处理时会遇到）。
+  //   按 SECUCODE 后缀核对市场：沪市 1 → .SH；深市 / 北交所 0 → .SZ / .BJ；不符的行丢弃（全部丢弃 = 空表 →「无现金分红记录」）；无 SECUCODE 的行保留
+  function rowsForMarket(rows, market) {
+    const ok = +market === 1 ? /\.SH$/i : /\.(SZ|BJ)$/i;
+    return rows.filter((r) => !(r && r.SECUCODE) || ok.test(String(r.SECUCODE)));
+  }
+  // 原始行（多页拼接）。从未分红的个股接口返回 success=false code=9201「返回数据为空」或 result null → 合法空表（与 tools/fetch_dividends.js 相同）
+  async function fetchDividendRows(code, market) {
+    if (typeof window !== 'undefined' && window.__DIV_TEST_ROWS && window.__DIV_TEST_ROWS[code]) return rowsForMarket(window.__DIV_TEST_ROWS[code], market); // 测试钩子：直接注入缓存的原始行
+    let rows = [], pages = 1;
+    for (let p = 1; p <= pages && p <= 5; p++) {
+      const j = await fetchDivPage(code, p);
+      if (!j || typeof j !== 'object') throw new Error('接口返回异常');
+      if (j.success === false && (j.code === 9201 || /返回数据为空/.test(String(j.message || '')))) return [];
+      if (j.success !== true || j.code !== 0) throw new Error('success=' + j.success + ' code=' + j.code + ' ' + (j.message || ''));
+      if (j.result == null) return [];
+      if (!Array.isArray(j.result.data)) throw new Error('result.data 不是数组');
+      rows = rows.concat(j.result.data);
+      pages = j.result.pages || 1;
+    }
+    return rowsForMarket(rows, market);
+  }
+  // 分红表 + 不复权日线并行拉取；失败不缓存（下次加载可重试）
+  function loadDividends(sym) {
+    const key = sym.market + '.' + sym.code;
+    if (divCache.has(key)) return divCache.get(key);
+    const p = Promise.all([fetchDividendRows(sym.code, sym.market), fetchKlines(sym.market, sym.code, '0')]).then(([rows, raw]) => ({ rows, raw }));
+    p.catch(() => divCache.delete(key));
+    divCache.set(key, p);
+    return p;
   }
 
   // ------------------------------------------------------------------ analytics
@@ -725,8 +782,19 @@
     $('tableNote').textContent = '（基于最新收盘 · ' + fqtName + ' · 红涨绿跌）';
   }
 
-  function renderYears(ys) {
-    $('yearChips').innerHTML = ys.map((y) => '<div class="chip ' + cls(y.v) + '" title="' + (y.fromListing ? '上市首年（自上市首日）' : '') + '"><div class="k">' + y.y + (y.fromListing ? '*' : '') + '</div><div class="v">' + pct(y.v) + '</div></div>').join('');
+  // info（可选，股票有分红数据时）：{ cashByFY: { 会计年度: 每股税前现金 }, bars: 不复权日线, partialFY: 只实施了中期派息的最近年度 | null } → 每个年份芯片追加 每股分红 / 股息率(年末价)（= 该会计年度现金 ÷ 该年最后一根不复权收盘）
+  function renderYears(ys, info) {
+    $('yearChips').innerHTML = ys.map((y) => {
+      let extra = '';
+      if (info) {
+        const cash = info.cashByFY[y.y];
+        const i = idxOnOrBefore(info.bars, ymd(y.y, 12, 31));
+        const close = i >= 0 && tToDate(info.bars[i].t).getUTCFullYear() === y.y ? info.bars[i].c : null;
+        const partial = info.partialFY === y.y ? '；FY' + y.y + ' 年报分红尚未实施（已含中期）' : '';
+        extra = '<div class="s" title="FY' + y.y + ' 每股税前现金（按报告期年份归属）' + partial + '">每股分红 ' + (cash != null ? cash.toFixed(3) : '—') + '</div><div class="s" title="FY' + y.y + ' 每股现金 ÷ ' + y.y + ' 年最后一根不复权收盘' + (close ? ' ' + fmtPrice(close) : '') + partial + '">股息率(年末价) ' + (cash != null && close ? pct(cash / close, 2, false) : '—') + '</div>';
+      }
+      return '<div class="chip ' + cls(y.v) + '" data-y="' + y.y + '" title="' + (y.fromListing ? '上市首年（自上市首日）' : '') + '"><div class="k">' + y.y + (y.fromListing ? '*' : '') + '</div><div class="v">' + pct(y.v) + '</div>' + extra + '</div>';
+    }).join('');
   }
 
   function renderStats(st) {
@@ -747,10 +815,91 @@
       (bears.length ? ' · 完整熊市均值 ' + pct(avg(bears, (p) => p.ret)) + ' / ' + fmtDurCN(avg(bears, (p) => p.days)) : '') + '）';
   }
 
+  // ------------------------------------------------------------------ dividends card
+  const DIV_TIPS = {
+    divYieldTTM: '最近 365 天内除息的每股税前现金之和（按其后送转折算到当前股本）÷ 最新不复权收盘。',
+    dpsTTM: '最近 365 天内除息的每股税前现金之和（元/股，按其后送转折算到当前股本）。',
+    divStreak: '自最近一个完整会计年度起向前连续有现金分红的会计年度数，不受区间限制。最近完整会计年度：9–12 月为当年 − 1；1–8 月（上一年度年报分红的实施季）若上一年度尚无已实施的现金分红，则为当年 − 2，并提示「年报分红尚未实施」；若上一年度只实施了中期 / 季度派息，仍计为该年度，提示「已含中期」。',
+    divYears: '所选区间内有现金分红的会计年度数 / 区间会计年度数（会计年度 = 分红对应的报告期年份；终点 = 最近完整会计年度，见「连续分红」）。',
+    avgDivYield: '区间内各会计年度股息率之和 ÷ N；年度股息率 = 该年度每股现金 ÷ 除息月前一月末不复权收盘；无分红年度计 0。最近年度只实施了中期派息时（提示「已含中期」），该年度暂按中期现金计。',
+    payoutRatio: 'Σ 每股现金 ÷ Σ 年报基本每股收益，只对区间内有分红且有年报 EPS 的会计年度求和。',
+    divContrib: '年化(分红再投资) − 纯价格年化。两者都用不复权日线，起点为区间首个交易日，每笔现金在除息后首个交易日按收盘买回；纯价格年化只计送转。上方卡片的「年化收益 CAGR」按所选复权方式计算，二者口径不同。后复权视图下，若年化(分红再投资)与同区间后复权年化相差超过 2 个百分点，此处标 hfq_gap（与筛选表同名标记）：东财复权对现金是加性处理、相当于分红不再投资，长历史高分红个股的差值天然较大；也可能是分红表缺送转 / 配股记录。前复权从历史价中扣减其后分红、区间年化不可比，前复权 / 不复权视图不做此判定。',
+  };
+  const DIV_MAX_ROWS = 12; // 分红明细超过此行数折叠
+  let divExpandedKey = null; // 已展开分红明细的标的（market.code）：区间 / 阈值 / 窗口大小变化重绘时保持展开，换标的时收起
+  const symKey = (sym) => sym.market + '.' + sym.code;
+  // 报告期 → 「2024年度 / 2024中期 / 2024三季 / 2024一季」；无报告期的事件按除息月归属（FY*）
+  function fmtReport(e) {
+    if (!e.rep) return { s: e.fy + '*', title: '无报告期，按除息月归属会计年度' };
+    const md = e.rep.slice(5);
+    const k = md === '12-31' ? '年度' : md === '06-30' ? '中期' : md === '09-30' ? '三季' : md === '03-31' ? '一季' : ' ' + md;
+    return { s: e.rep.slice(0, 4) + k, title: '报告期 ' + e.rep };
+  }
+  // 当前区间的分红汇总：数据终点 = 不复权日线末根；区间起点与 sliceByRange 相同；最近完整会计年度 = DIV.latestCompleteFY（9–12 月：末根所在年 − 1；1–8 月上一年度年报分红未实施时 − 2）；
+  //   只在后复权视图下把页面已加载的后复权序列交给 summarize 复刻筛选器的 hfq_gap 标记（筛选器以后复权定义该标记；前复权对现金分红作加性扣减、区间年化系统性偏高，会把干净的高股息个股误标，不复权则无可比序列 → 两者都不判）
+  function computeDiv() {
+    const D = divLib(), bars = state.div.raw.bars;
+    const lastT = bars[bars.length - 1].t;
+    const startT = state.range === 'all' ? bars[0].t : Math.max(bars[0].t, addMonths(lastT, -12 * parseInt(state.range, 10)));
+    const events = D.normalizeEvents(state.div.rows, lastT);
+    return D.summarize(events, bars, { startT, endT: lastT, hfqBars: state.fqt === '2' && state.data ? state.data.bars : null });
+  }
+  function renderDividends() {
+    const card = $('divCard'), note = $('divNote'), kp = $('divKpis'), tbl = $('divTable'), tnote = $('divTableNote'), more = $('divMore'), btn = $('btnDivMore');
+    const sym = state.sym, dv = state.div;
+    if (!sym || sym.type !== 'S' || !dv || !state.data) { card.hidden = true; return; }
+    card.hidden = false;
+    const D = divLib();
+    const bars = dv.raw && dv.raw.bars;
+    if (dv.error || !D || !bars || !bars.length) {
+      note.textContent = '（分红数据暂不可用）'; note.title = dv.error || (!D ? 'dividends.js 未加载' : '不复权日线为空');
+      kp.innerHTML = ''; tbl.innerHTML = ''; tnote.textContent = ''; more.hidden = true;
+      ['data-close', 'data-dataend', 'data-fyfrom', 'data-lastfy', 'data-events', 'data-pendingfy', 'data-partialfy', 'data-flags', 'data-cagradj'].forEach((a) => card.removeAttribute(a));
+      return;
+    }
+    const S = computeDiv();
+    card.dataset.close = S.closeEnd; card.dataset.dataend = fmtDate(S.dataEndT); card.dataset.fyfrom = S.fyFrom; card.dataset.lastfy = S.lastFY; card.dataset.events = S.events.length;
+    card.dataset.pendingfy = S.pendingFY != null ? S.pendingFY : ''; card.dataset.partialfy = S.partialFY != null ? S.partialFY : ''; card.dataset.flags = S.flags.join(' '); card.dataset.cagradj = S.cagrAdj != null ? S.cagrAdj : '';
+    const cashEvents = S.events.filter((e) => e.cash > 0);
+    note.title = '';
+    note.textContent = cashEvents.length ? '（数据：东方财富分红明细 · 不复权日线至 ' + fmtDate(S.dataEndT) + ' · 会计年度 FY' + S.fyFrom + '–FY' + S.lastFY + ' · 共 ' + cashEvents.length + ' 笔现金分红）' : '（无现金分红记录 · 数据：东方财富分红明细 · 不复权日线至 ' + fmtDate(S.dataEndT) + '）';
+    const insufficient = S.flags.indexOf('insufficient') >= 0 || S.flags.indexOf('px_missing') >= 0;
+    // 1–8 月的提示：年报分红尚未实施（最近完整年度后移了一年），或 最近年度只实施了中期 / 季度派息（年度现金暂只含中期）
+    const partial = S.partialFY != null ? ' · FY' + S.partialFY + ' 年报分红尚未实施（已含中期）' : '';
+    const pending = S.pendingFY != null ? ' · FY' + S.pendingFY + ' 年报分红尚未实施' : partial;
+    const gapHint = S.flags.indexOf('hfq_gap') >= 0 ? ' · 与同区间后复权年化 ' + pct(S.cagrAdj, 2) + ' 相差 ' + Math.abs(S.trGap * 100).toFixed(1) + ' pp（hfq_gap：复权口径差异，或分红表缺送转 / 配股记录）' : '';
+    const cells = [
+      { key: 'divYieldTTM', k: '股息率(近12月)', v: pct(S.divYieldTTM, 2, false), s: '近12月每股分红 ' + S.dpsTTM.toFixed(4) + ' 元 · 收盘 ' + fmtPrice(S.closeEnd) + '（' + fmtDate(S.dataEndT) + '）', val: S.divYieldTTM },
+      { key: 'dpsTTM', k: '近12月每股分红(税前)', v: S.dpsTTM.toFixed(4) + ' 元', s: '除息日在 (' + fmtDate(S.dataEndT - 365) + ', ' + fmtDate(S.dataEndT) + '] · 按其后送转折算', val: S.dpsTTM },
+      { key: 'divStreak', k: '连续分红', v: S.divStreak + ' 年', s: '自 FY' + S.lastFY + ' 向前连续有现金分红的会计年度' + pending, val: S.divStreak },
+      { key: 'divYears', k: '分红年数(区间)', v: S.divYears.paid + '/' + S.divYears.total, s: S.divYears.total > 0 ? 'FY' + S.fyFrom + '–FY' + S.lastFY + ' 中有现金分红的年度数' + pending : '区间内尚无完整会计年度' + pending, val: S.divYears.paid + '/' + S.divYears.total },
+      { key: 'avgDivYield', k: '平均股息率(区间)', v: pct(S.avgDivYield, 2, false), s: '各年度每股现金 ÷ 除息前一月末收盘，无分红年度计 0' + partial, val: S.avgDivYield },
+      { key: 'payoutRatio', k: '派息率(区间)', v: S.payoutRatio != null ? pct(S.payoutRatio, 1, false) : '—', s: S.payoutRatio != null ? 'Σ 每股现金 ÷ Σ 年报基本 EPS' : '无可用年报 EPS', val: S.payoutRatio },
+      { key: 'divContrib', k: '分红贡献(区间)', v: S.divContrib != null ? pct(S.divContrib, 2) : '—', s: S.cagrTR != null ? '年化(分红再投资) ' + pct(S.cagrTR, 2) + ' · 纯价格年化 ' + pct(S.cagrPx, 2) + ' · ' + fmtDate(S.trStartT) + ' → ' + fmtDate(S.trEndT) + gapHint : (insufficient ? '区间数据不足' : '—'), val: S.divContrib },
+    ];
+    kp.innerHTML = cells.map((c) => '<div class="kpi" data-key="' + c.key + '" data-value="' + (c.val == null ? '' : c.val) + '" title="' + esc(DIV_TIPS[c.key]) + '"><div class="k">' + c.k + '</div><div class="v">' + c.v + '</div><div class="s">' + esc(c.s) + '</div></div>').join('');
+    // 分红明细：当前区间会计年度内的现金分红事件，新→旧；超过 DIV_MAX_ROWS 行折叠（同一标的已展开的，重绘后保持展开）
+    const rows = cashEvents.filter((e) => e.fy >= S.fyFrom).reverse();
+    const head = '<thead><tr><th>报告期</th><th>每股税前现金(元)</th><th>送转(每10股)</th><th>除息日</th><th>股息率(除息前一月收盘)</th></tr></thead>';
+    const body = rows.map((e, i) => {
+      const rp = fmtReport(e);
+      return '<tr' + (i >= DIV_MAX_ROWS ? ' class="more"' : '') + '><td title="' + esc(rp.title) + '">' + esc(rp.s) + '</td><td>' + e.cash + '</td><td>' + (e.split > 1 ? ((e.split - 1) * 10).toFixed(2).replace(/\.?0+$/, '') : '—') + '</td><td>' + e.ex + '</td><td>' + (e.yieldDisp != null ? pct(e.yieldDisp, 2, false) : '—') + '</td></tr>';
+    }).join('');
+    const expanded = rows.length > DIV_MAX_ROWS && divExpandedKey === symKey(sym);
+    tbl.classList.toggle('expanded', expanded);
+    tbl.innerHTML = head + '<tbody>' + body + '</tbody>';
+    tnote.textContent = rows.length ? '（FY' + S.fyFrom + ' 起 · ' + rows.length + ' 笔 · 新→旧）' : '（FY' + S.fyFrom + ' 起无现金分红）';
+    more.hidden = rows.length <= DIV_MAX_ROWS;
+    btn.textContent = expanded ? '收起' : '展开全部 ' + rows.length + ' 条'; btn.dataset.n = rows.length;
+    // 年度涨跌幅芯片追加 每股分红 / 股息率(年末价)
+    renderYears(yearlyReturns(state.data.bars), { cashByFY: S.cashByFY, bars, partialFY: S.partialFY });
+  }
+
   // ------------------------------------------------------------------ state & flow
   const FQT_NAME = { '0': '不复权', '1': '前复权', '2': '后复权' };
   const BASIS_NAME = { D: '日收盘', W: '周收盘', M: '月收盘' };
-  const state = { sym: null, range: '10y', fqt: '1', th: 0.2, basis: 'auto', data: null, A: null };
+  const state = { sym: null, range: '10y', fqt: '1', th: 0.2, basis: 'auto', data: null, A: null, div: null }; // div: { rows, raw } | { error } | null（分红数据，仅股票）
+  let divSeq = 0; // 分红数据请求序号：切换标的后丢弃迟到的结果
 
   function setStatus(msg, kind) { const s = $('status'); s.textContent = msg || ''; s.className = 'status' + (kind ? ' ' + kind : ''); s.hidden = !msg; }
   function show(ids, on) { ids.forEach((id) => { $(id).hidden = !on; }); }
@@ -798,6 +947,7 @@
     renderYears(yearlyReturns(d.bars));
     renderStats(periodStats(view));
     renderPhases(A, state.th);
+    if (state.sym && state.sym.type === 'S' && state.div) renderDividends(); else $('divCard').hidden = true; // 分红卡片随区间重算；ETF / LOF 或数据未到时隐藏
     show(['kpis', 'chartCard', 'tableCard', 'yearCard', 'statCard', 'phaseCard'], true);
     $('btnPng').disabled = false; $('btnLink').disabled = false;
     document.title = meta.name + ' ' + meta.code + ' · 历史表现看板';
@@ -805,7 +955,13 @@
   }
 
   async function loadSymbol(sym) {
+    if (divExpandedKey && divExpandedKey !== symKey(sym)) divExpandedKey = null; // 换标的：分红明细收起（同标的换复权方式则保持）
     state.sym = sym;
+    // 分红数据（仅股票）：与 K 线并行拉取，K 线就位后再渲染；拉取失败时卡片显示「分红数据暂不可用」，其余不受影响
+    state.div = null; $('divCard').hidden = true;
+    const mySeq = ++divSeq;
+    const divP = sym.type === 'S' ? loadDividends(sym) : null;
+    if (divP) divP.catch(() => {});
     $('search').value = sym.name ? sym.name + ' (' + sym.code + ')' : sym.code;
     setStatus('正在拉取 ' + (sym.name || sym.code) + ' 的全部日线数据…', 'loading');
     try {
@@ -820,6 +976,7 @@
       if (!sym.name) sym.name = d.name;
       state.data = d;
       applyView();
+      if (divP) divP.then((r) => { if (mySeq !== divSeq) return; state.div = r; renderDividends(); }, (e) => { if (mySeq !== divSeq) return; state.div = { error: (e && e.message) || String(e) }; renderDividends(); });
     } catch (e) {
       setStatus('拉取失败：' + (e && e.message ? e.message : e) + '。请检查网络（需要能访问 push2his.eastmoney.com），稍后重试。', 'error');
     }
@@ -892,6 +1049,11 @@
       try { await navigator.clipboard.writeText(location.href); $('btnLink').textContent = '已复制'; setTimeout(() => ($('btnLink').textContent = '复制链接'), 1200); } catch (e) { prompt('复制下面的链接：', location.href); }
     });
     $('btnPng').addEventListener('click', exportPNG);
+    $('btnDivMore').addEventListener('click', () => {
+      const tbl = $('divTable'), on = tbl.classList.toggle('expanded');
+      divExpandedKey = on && state.sym ? symKey(state.sym) : null;
+      $('btnDivMore').textContent = on ? '收起' : '展开全部 ' + ($('btnDivMore').dataset.n || '') + ' 条';
+    });
     let rt = null;
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (state.A) applyView(); }, 160); });
   }
